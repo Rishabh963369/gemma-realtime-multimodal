@@ -170,7 +170,7 @@ class GemmaMultimodalProcessor:
     async def set_image(self, image_data):
         async with self.lock:
             try:
-                if not image_data or len(image_data) < 100:  # Basic validation
+                if not image_data or len(image_data) < 100:
                     logger.warning("Invalid or empty image data received")
                     return False
                 image = Image.open(io.BytesIO(image_data))
@@ -260,7 +260,7 @@ async def handle_client(websocket):
     async def process_speech_segment(speech_segment):
         try:
             transcription = await transcriber.transcribe(speech_segment)
-            if not transcription or not any(c.isalnum() for c in transcription)):
+            if not transcription or not any(c.isalnum() for c in transcription):
                 logger.info(f"Skipping empty transcription: '{transcription}'")
                 return
             await detector.set_tts_playing(True)
