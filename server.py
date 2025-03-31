@@ -63,27 +63,28 @@ class AudioSegmentDetector:
         async with self.tts_lock:
             self.tts_playing = is_playing
     
+
+
     async def cancel_current_tasks(self):
-        """Cancel any ongoing generation and TTS tasks"""
+        """Improved task cancellation with proper async handling"""
         async with self.task_lock:
+            cancel_tasks = []
             if self.current_generation_task and not self.current_generation_task.done():
-                self.current_generation_task.cancel()
-                try:
-                    await self.current_generation_task
-                except asyncio.CancelledError:
-                    pass
-                self.current_generation_task = None
-            
+                cancel_tasks.append(self.current_generation_task)
             if self.current_tts_task and not self.current_tts_task.done():
-                self.current_tts_task.cancel()
+                cancel_tasks.append(self.current_tts_task)
+            
+            for task in cancel_tasks:
+                task.cancel()
                 try:
-                    await self.current_tts_task
+                    await task
                 except asyncio.CancelledError:
                     pass
-                self.current_tts_task = None
             
-            # Clear TTS playing state
+            self.current_generation_task = None
+            self.current_tts_task = None
             await self.set_tts_playing(False)
+
     
     async def set_current_tasks(self, generation_task=None, tts_task=None):
         """Set current generation and TTS tasks"""
@@ -192,16 +193,16 @@ class WhisperTranscriber:
         self.torch_dtype = torch.float16 if self.device != "cpu" else torch.float32
         
         # Load model and processor
-        model_id = "openai/whisper-large-v3-turbo"
+        model_id = "openai/whisper-medium.en"
         logger.info(f"Loading {model_id}...")
         
         # Load model
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_id, 
+            model_id,
+            attn_implementation="flash_attention_2",
             torch_dtype=self.torch_dtype,
-            low_cpu_mem_usage=True, 
-            use_safetensors=True
         )
+
         self.model.to(self.device)
         
         # Load processor
@@ -280,9 +281,10 @@ class GemmaMultimodalProcessor:
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
             device_map="auto",
-            load_in_8bit=True,  # Enable 8-bit quantization
+            load_in_4bit=True,  # More efficient than 8-bit
             torch_dtype=torch.bfloat16
         )
+
         
         # Load processor
         self.processor = AutoProcessor.from_pretrained(model_id)
@@ -415,11 +417,11 @@ class GemmaMultimodalProcessor:
                 # Start generation in a separate thread
                 generation_kwargs = dict(
                     **inputs,
-                    max_new_tokens=128,
-                    do_sample=True,
-                    temperature=0.7,
-                    use_cache=True,
-                    streamer=streamer,
+                    max_new_tokens=64,  # Reduced from 128
+                    temperature=0.4,     # More deterministic
+                    top_p=0.9,
+                    repetition_penalty=1.2,
+
                 )
                 
                 thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
