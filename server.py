@@ -4,7 +4,14 @@ import websockets
 import base64
 import torch
 # Corrected Gemma import if using Gemma 2
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, GemmaForConditionalGeneration, BitsAndBytesConfig
+ffrom transformers import (
+    AutoModelForSpeechSeq2Seq,
+    AutoProcessor,
+    pipeline,
+    GemmaForCausalLM, 
+    BitsAndBytesConfig
+)
+
 import numpy as np
 import logging
 import sys
@@ -344,17 +351,22 @@ class GemmaMultimodalProcessor:
             quantization_config = BitsAndBytesConfig(
                  load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16
             )
-            self.model = GemmaForConditionalGeneration.from_pretrained(
-                model_id, device_map="auto", quantization_config=quantization_config,
+            # CORRECTED CLASS HERE:
+            self.model = GemmaForCausalLM.from_pretrained(
+                model_id,
+                device_map="auto",
+                quantization_config=quantization_config,
                 torch_dtype=torch.bfloat16 # Match compute dtype
             )
             self.processor = AutoProcessor.from_pretrained(model_id)
             logger.info("Gemma model ready.")
 
+
             self.last_image = None
             self.image_lock = asyncio.Lock()
             self.message_history = []
             self.max_history_len = 4 # Turns (User + Assistant = 1 turn) -> 2 turns history
+
             self.history_lock = asyncio.Lock()
             self.generation_count = 0
             self.system_prompt = """You are a helpful assistant providing spoken responses about images and engaging in natural conversation. Keep responses concise, fluent, and conversational (1-3 short sentences). Use natural language suitable for speaking aloud.
