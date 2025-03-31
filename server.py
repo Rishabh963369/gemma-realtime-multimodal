@@ -10,7 +10,7 @@ import sys
 import io
 from PIL import Image
 import time
-from kokoro import KPipeline  # Assuming this is the correct import for Kokoro TTS
+from kokoro import KPipeline
 
 # Configure logging
 logging.basicConfig(
@@ -32,7 +32,7 @@ class AudioSegmentDetector:
         self.silence_counter = 0
         self.speech_start_idx = 0
         self.lock = asyncio.Lock()
-        self.segment_queue = asyncio.Queue(maxsize=10)  # Limit queue size
+        self.segment_queue = asyncio.Queue(maxsize=10)
         self.segments_detected = 0
         self.tts_playing = False
         self.tts_lock = asyncio.Lock()
@@ -61,7 +61,7 @@ class AudioSegmentDetector:
             self.current_generation_task = None
             self.current_tts_task = None
             while not self.segment_queue.empty():
-                await self.segment_queue.get()  # Clear queue
+                await self.segment_queue.get()
             await self.set_tts_playing(False)
 
     async def set_current_tasks(self, generation_task=None, tts_task=None):
@@ -137,7 +137,7 @@ class WhisperTranscriber:
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             if len(audio_array) < 500:
                 return ""
-            result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"array": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english", "temperature": 0.0}))
+            result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"input_features": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"}))
             text = result.get("text", "").strip()
             self.transcription_count += 1
             logger.info(f"Transcription: '{text}'")
@@ -170,19 +170,27 @@ class GemmaMultimodalProcessor:
     async def set_image(self, image_data):
         async with self.lock:
             try:
-                image = Image.open(io.BytesIO(image_data)).resize((int(image.size[0] * 0.75), int(image.size[1] * 0.75)), Image.Resampling.LANCZOS)
+                if not image_data or len(image_data) < 100:  # Basic validation
+                    logger.warning("Invalid or empty image data received")
+                    return False
+                image = Image.open(io.BytesIO(image_data))
+                resized_image = image.resize((int(image.size[0] * 0.75), int(image.size[1] * 0.75)), Image.Resampling.LANCZOS)
                 self.message_history = []
-                self.last_image = image
+                self.last_image = resized_image
                 self.last_image_timestamp = time.time()
+                logger.info("Image set successfully")
                 return True
             except Exception as e:
-                logger.error(f"Error processing image: {e}")
+                logger.error(f"Error processing image: {str(e)}")
                 return False
 
     def _build_messages(self, text):
         messages = [{"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation."}]}]
         messages.extend(self.message_history)
-        messages.append({"role": "user", "content": [{"type": "image", "image": self.last_image}, {"type": "text", "text": text}]})
+        if self.last_image:
+            messages.append({"role": "user", "content": [{"type": "image", "image": self.last_image}, {"type": "text", "text": text}]})
+        else:
+            messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
         return messages
 
     def _update_history(self, user_text, assistant_response):
@@ -191,8 +199,6 @@ class GemmaMultimodalProcessor:
     async def generate_streaming(self, text):
         async with self.lock:
             try:
-                if not self.last_image:
-                    return None, "No image available."
                 messages = self._build_messages(text)
                 inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
                 from transformers import TextIteratorStreamer
@@ -206,10 +212,11 @@ class GemmaMultimodalProcessor:
                     if len(initial_text) > 20 or "." in chunk or "," in chunk:
                         break
                 self.generation_count += 1
+                logger.info(f"Generated initial text: '{initial_text}'")
                 return streamer, initial_text
             except Exception as e:
                 logger.error(f"Gemma streaming error: {e}")
-                return None, f"Error: {e}"
+                return None, f"Sorry, I couldn’t process that due to an error."
 
 class KokoroTTSProcessor:
     _instance = None
@@ -237,6 +244,7 @@ class KokoroTTSProcessor:
             if audio_segments:
                 combined_audio = np.concatenate(audio_segments)
                 self.synthesis_count += 1
+                logger.info(f"TTS synthesized: {len(combined_audio)} samples")
                 return combined_audio
             return None
         except Exception as e:
@@ -252,16 +260,24 @@ async def handle_client(websocket):
     async def process_speech_segment(speech_segment):
         try:
             transcription = await transcriber.transcribe(speech_segment)
-            if not transcription or not any(c.isalnum() for c in transcription):
+            if not transcription or not any(c.isalnum() for c in transcription)):
+                logger.info(f"Skipping empty transcription: '{transcription}'")
                 return
             await detector.set_tts_playing(True)
             streamer, initial_text = await gemma_processor.generate_streaming(transcription)
             if not streamer or not initial_text:
+                logger.error("No response generated")
+                initial_audio = await tts_processor.synthesize_speech("Sorry, I couldn’t generate a response.")
+                if initial_audio is not None:
+                    audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
+                    await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
                 return
             initial_audio = await tts_processor.synthesize_speech(initial_text)
             if initial_audio is not None:
                 audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
                 await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
+            else:
+                logger.error("Initial audio synthesis failed")
             remaining_text = ""
             for chunk in streamer:
                 remaining_text += chunk
@@ -269,9 +285,17 @@ async def handle_client(websocket):
             if remaining_audio is not None:
                 audio_bytes = (remaining_audio * 32767).astype(np.int16).tobytes()
                 await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
+            else:
+                logger.error("Remaining audio synthesis failed")
             gemma_processor._update_history(transcription, initial_text + remaining_text)
         except asyncio.CancelledError:
             logger.info("Processing cancelled")
+        except Exception as e:
+            logger.error(f"Processing error: {e}")
+            error_audio = await tts_processor.synthesize_speech("Sorry, an error occurred.")
+            if error_audio is not None:
+                audio_bytes = (error_audio * 32767).astype(np.int16).tobytes()
+                await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
         finally:
             await detector.set_tts_playing(False)
 
@@ -286,15 +310,22 @@ async def handle_client(websocket):
 
     async def receive_audio_and_images():
         async for message in websocket:
-            data = json.loads(message)
-            if "realtime_input" in data:
-                for chunk in data["realtime_input"]["media_chunks"]:
-                    if chunk["mime_type"] == "audio/pcm":
-                        await detector.add_audio(base64.b64decode(chunk["data"]))
-                    elif chunk["mime_type"] == "image/jpeg" and not detector.tts_playing:
-                        await gemma_processor.set_image(base64.b64decode(chunk["data"]))
-            if "image" in data and not detector.tts_playing:
-                await gemma_processor.set_image(base64.b64decode(data["image"]))
+            try:
+                data = json.loads(message)
+                if "realtime_input" in data:
+                    for chunk in data["realtime_input"]["media_chunks"]:
+                        if chunk["mime_type"] == "audio/pcm":
+                            await detector.add_audio(base64.b64decode(chunk["data"]))
+                        elif chunk["mime_type"] == "image/jpeg" and not detector.tts_playing:
+                            image_data = base64.b64decode(chunk["data"])
+                            if image_data:
+                                await gemma_processor.set_image(image_data)
+                if "image" in data and not detector.tts_playing:
+                    image_data = base64.b64decode(data["image"])
+                    if image_data:
+                        await gemma_processor.set_image(image_data)
+            except Exception as e:
+                logger.error(f"Error receiving data: {e}")
 
     async def send_keepalive():
         while True:
