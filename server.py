@@ -649,12 +649,12 @@ class ClientState:
              # logger.debug(f"[{self.client_id}] Current processing task set (exists: {task is not None}).")
 
 
-async def handle_client(websocket, path):
+async def handle_client(websocket):
     """Handles a single WebSocket client connection."""
     state = ClientState()
     client_addr = websocket.remote_address
     logger.info(f"[{state.client_id}] Client connected from {client_addr}")
-
+    
     try:
         detector = AudioSegmentDetector()
         transcriber = WhisperTranscriber.get_instance()
