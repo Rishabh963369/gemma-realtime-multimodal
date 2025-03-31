@@ -63,28 +63,27 @@ class AudioSegmentDetector:
         async with self.tts_lock:
             self.tts_playing = is_playing
     
-
-
     async def cancel_current_tasks(self):
-        """Improved task cancellation with proper async handling"""
+        """Cancel any ongoing generation and TTS tasks"""
         async with self.task_lock:
-            cancel_tasks = []
             if self.current_generation_task and not self.current_generation_task.done():
-                cancel_tasks.append(self.current_generation_task)
-            if self.current_tts_task and not self.current_tts_task.done():
-                cancel_tasks.append(self.current_tts_task)
-            
-            for task in cancel_tasks:
-                task.cancel()
+                self.current_generation_task.cancel()
                 try:
-                    await task
+                    await self.current_generation_task
                 except asyncio.CancelledError:
                     pass
+                self.current_generation_task = None
             
-            self.current_generation_task = None
-            self.current_tts_task = None
+            if self.current_tts_task and not self.current_tts_task.done():
+                self.current_tts_task.cancel()
+                try:
+                    await self.current_tts_task
+                except asyncio.CancelledError:
+                    pass
+                self.current_tts_task = None
+            
+            # Clear TTS playing state
             await self.set_tts_playing(False)
-
     
     async def set_current_tasks(self, generation_task=None, tts_task=None):
         """Set current generation and TTS tasks"""
@@ -193,7 +192,7 @@ class WhisperTranscriber:
         self.torch_dtype = torch.float16 if self.device != "cpu" else torch.float32
         
         # Load model and processor
-        model_id = "openai/whisper-medium.en"
+        model_id = "openai/whisper-large-v3-turbo"
         logger.info(f"Loading {model_id}...")
         
         # Load model
@@ -295,10 +294,6 @@ class GemmaMultimodalProcessor:
         self.last_image_timestamp = 0
         self.lock = asyncio.Lock()
         
-        # Message history management
-        self.message_history = []
-        self.max_history_messages = 4  # Keep last 4 exchanges (2 user, 2 assistant)
-        
         # Counter
         self.generation_count = 0
     
@@ -311,10 +306,8 @@ class GemmaMultimodalProcessor:
                 
                 # Resize to 75% of original size
                 new_size = (int(image.size[0] * 0.75), int(image.size[1] * 0.75))
-                image = image.resize(new_size, Image.Resampling.LANCZOS)
+                image = image.resize(new_size, Image.LANCZOS)
                 
-                # Clear message history when new image is set
-                self.message_history = []
                 self.last_image = image
                 self.last_image_timestamp = time.time()
                 return True
@@ -322,65 +315,6 @@ class GemmaMultimodalProcessor:
                 logger.error(f"Error processing image: {e}")
                 return False
     
-    def _build_messages(self, text):
-        """Build messages array with history for the model"""
-        messages = [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": """You are a helpful assistant providing spoken 
-                responses about images and engaging in natural conversation. Keep your responses concise, 
-                fluent, and conversational. Use natural oral language that's easy to listen to.
-
-                When responding:
-                1. If the user's question or comment is clearly about the image, provide a relevant,
-                   focused response about what you see.
-                2. If the user's input is not clearly related to the image or lacks context:
-                   - Don't force image descriptions into your response
-                   - Respond naturally as in a normal conversation
-                   - If needed, politely ask for clarification (e.g., "Could you please be more specific 
-                     about what you'd like to know about the image?")
-                3. Keep responses concise:
-                   - Aim for 2-3 short sentences
-                   - Focus on the most relevant information
-                   - Use conversational language
-                
-                Maintain conversation context and refer to previous exchanges naturally when relevant.
-                If the user's request is unclear, ask them to repeat or clarify in a friendly way."""}]
-            }
-        ]
-        
-        # Add conversation history
-        messages.extend(self.message_history)
-        
-        # Add current user message with image
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "image", "image": self.last_image},
-                {"type": "text", "text": text}
-            ]
-        })
-        
-        return messages
-    
-    def _update_history(self, user_text, assistant_response):
-        """Update message history with new exchange"""
-        # Add user message
-        self.message_history.append({
-            "role": "user",
-            "content": [{"type": "text", "text": user_text}]
-        })
-        
-        # Add assistant response
-        self.message_history.append({
-            "role": "assistant",
-            "content": [{"type": "text", "text": assistant_response}]
-        })
-        
-        # Trim history to keep only recent messages
-        if len(self.message_history) > self.max_history_messages:
-            self.message_history = self.message_history[-self.max_history_messages:]
-                
     async def generate_streaming(self, text, initial_chunks=3):
         """Generate a response using the latest image and text input with streaming for initial chunks"""
         async with self.lock:
@@ -389,8 +323,38 @@ class GemmaMultimodalProcessor:
                     logger.warning("No image available for multimodal generation")
                     return None, f"No image context: {text}"
                 
-                # Build messages with history
-                messages = self._build_messages(text)
+                # Build messages array
+                messages = [
+                    {
+                        "role": "system",
+                        "content": [{"type": "text", "text": """You are a helpful assistant providing spoken 
+                        responses about images and engaging in natural conversation. Keep your responses concise, 
+                        fluent, and conversational. Use natural oral language that's easy to listen to.
+
+                        When responding:
+                        1. If the user's question or comment is clearly about the image, provide a relevant,
+                           focused response about what you see.
+                        2. If the user's input is not clearly related to the image or lacks context:
+                           - Don't force image descriptions into your response
+                           - Respond naturally as in a normal conversation
+                           - If needed, politely ask for clarification (e.g., "Could you please be more specific 
+                             about what you'd like to know about the image?")
+                        3. Keep responses concise:
+                           - Aim for 2-3 short sentences
+                           - Focus on the most relevant information
+                           - Use conversational language
+                        
+                        Maintain conversation context and refer to previous exchanges naturally when relevant.
+                        If the user's request is unclear, ask them to repeat or clarify in a friendly way."""}]
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": self.last_image},
+                            {"type": "text", "text": text}
+                        ]
+                    }
+                ]
                 
                 # Prepare inputs for the model
                 inputs = self.processor.apply_chat_template(
@@ -455,41 +419,11 @@ class GemmaMultimodalProcessor:
                 self.generation_count += 1
                 logger.info(f"Gemma initial generation: '{initial_text}' ({len(initial_text)} chars)")
                 
-                # Don't update history yet - wait for complete response
-                # Store user message for later
-                self.pending_user_message = text
-                self.pending_response = initial_text
-                
                 return streamer, initial_text
                 
             except Exception as e:
                 logger.error(f"Gemma streaming generation error: {e}")
                 return None, f"Error processing: {text}"
-
-    def _update_history_with_complete_response(self, user_text, initial_response, remaining_text=None):
-        """Update message history with complete response, including any remaining text"""
-        # Combine initial and remaining text if available
-        complete_response = initial_response
-        if remaining_text:
-            complete_response = initial_response + remaining_text
-        
-        # Add user message
-        self.message_history.append({
-            "role": "user",
-            "content": [{"type": "text", "text": user_text}]
-        })
-        
-        # Add complete assistant response
-        self.message_history.append({
-            "role": "assistant",
-            "content": [{"type": "text", "text": complete_response}]
-        })
-        
-        # Trim history to keep only recent messages
-        if len(self.message_history) > self.max_history_messages:
-            self.message_history = self.message_history[-self.max_history_messages:]
-        
-        logger.info(f"Updated message history with complete response ({len(complete_response)} chars)")
 
     async def generate(self, text):
         """Generate a response using the latest image and text input (non-streaming)"""
@@ -499,8 +433,38 @@ class GemmaMultimodalProcessor:
                     logger.warning("No image available for multimodal generation")
                     return f"No image context: {text}"
                 
-                # Build messages with history
-                messages = self._build_messages(text)
+                # Build messages
+                messages = [
+                    {
+                        "role": "system",
+                        "content": [{"type": "text", "text": """You are a helpful assistant providing spoken 
+                        responses about images and engaging in natural conversation. Keep your responses concise, 
+                        fluent, and conversational. Use natural oral language that's easy to listen to.
+
+                        When responding:
+                        1. If the user's question or comment is clearly about the image, provide a relevant,
+                           focused response about what you see.
+                        2. If the user's input is not clearly related to the image or lacks context:
+                           - Don't force image descriptions into your response
+                           - Respond naturally as in a normal conversation
+                           - If needed, politely ask for clarification (e.g., "Could you please be more specific 
+                             about what you'd like to know about the image?")
+                        3. Keep responses concise:
+                           - Aim for 2-3 short sentences
+                           - Focus on the most relevant information
+                           - Use conversational language
+                        
+                        Maintain conversation context and refer to previous exchanges naturally when relevant.
+                        If the user's request is unclear, ask them to repeat or clarify in a friendly way."""}]
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": self.last_image},
+                            {"type": "text", "text": text}
+                        ]
+                    }
+                ]
                 
                 # Prepare inputs for the model
                 inputs = self.processor.apply_chat_template(
@@ -527,9 +491,6 @@ class GemmaMultimodalProcessor:
                     generation[0][input_len:],
                     skip_special_tokens=True
                 )
-                
-                # Update conversation history
-                self._update_history(text, generated_text)
                 
                 self.generation_count += 1
                 logger.info(f"Gemma generation result ({len(generated_text)} chars)")
@@ -748,6 +709,9 @@ async def handle_client(websocket):
                             
                             # Set TTS playing flag and start new generation workflow
                             await detector.set_tts_playing(True)
+
+                            # Cancel existing tasks
+                            await detector.cancel_current_tasks()
                             
                             try:
                                 # Create generation task
@@ -800,11 +764,6 @@ async def handle_client(websocket):
                                                 # Wait for remaining text collection
                                                 remaining_text = await remaining_text_task
                                                 
-                                                # Update message history with complete response
-                                                gemma_processor._update_history_with_complete_response(
-                                                    transcription, initial_text, remaining_text
-                                                )
-                                                
                                                 if remaining_text:
                                                     # Create TTS task for remaining text
                                                     remaining_tts_task = asyncio.create_task(
@@ -829,23 +788,14 @@ async def handle_client(websocket):
                                                             }))
                                                     
                                                     except asyncio.CancelledError:
-                                                        # Even if TTS is cancelled, keep the message history
                                                         logger.info("Remaining TTS cancelled - new speech detected")
                                                         continue
                                             
                                             except asyncio.CancelledError:
-                                                # If text collection is cancelled, update history with what we have
-                                                gemma_processor._update_history_with_complete_response(
-                                                    transcription, initial_text
-                                                )
                                                 logger.info("Remaining text collection cancelled - new speech detected")
                                                 continue
                                     
                                     except asyncio.CancelledError:
-                                        # If initial TTS is cancelled, still update history
-                                        gemma_processor._update_history_with_complete_response(
-                                            transcription, initial_text
-                                        )
                                         logger.info("Initial TTS cancelled - new speech detected")
                                         continue
                             
@@ -918,6 +868,7 @@ async def handle_client(websocket):
     finally:
         # Ensure TTS playing flag is cleared when connection ends
         await detector.set_tts_playing(False)
+
 
 async def main():
     """Main function to start the WebSocket server"""
