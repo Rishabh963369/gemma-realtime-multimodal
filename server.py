@@ -13,6 +13,7 @@ import time
 import os
 from datetime import datetime
 import re
+from threading import Thread
 
 # Import Kokoro TTS library
 from kokoro import KPipeline
@@ -64,23 +65,31 @@ class AudioSegmentDetector:
         async with self.tts_lock:
             self.tts_playing = is_playing
 
-    async def cancel_current_tasks(self):
+    async def cancel_current_tasks(self, reason="New segment detected"):
         """Cancel any ongoing generation and TTS tasks"""
         async with self.task_lock:
-            if self.current_generation_task and not self.current_generation_task.done():
-                self.current_generation_task.cancel()
-                try:
-                    await self.current_generation_task
-                except asyncio.CancelledError:
-                    pass
+            if self.current_generation_task:
+                if not self.current_generation_task.done():
+                    logger.info(f"Cancelling generation task: {reason}")
+                    self.current_generation_task.cancel(reason)
+                    try:
+                        await self.current_generation_task
+                    except asyncio.CancelledError:
+                        logger.info("Generation task successfully cancelled.")
+                    except Exception as e:
+                        logger.error(f"Error awaiting generation task cancellation: {e}")
                 self.current_generation_task = None
 
-            if self.current_tts_task and not self.current_tts_task.done():
-                self.current_tts_task.cancel()
-                try:
-                    await self.current_tts_task
-                except asyncio.CancelledError:
-                    pass
+            if self.current_tts_task:
+                if not self.current_tts_task.done():
+                    logger.info(f"Cancelling TTS task: {reason}")
+                    self.current_tts_task.cancel(reason)
+                    try:
+                        await self.current_tts_task
+                    except asyncio.CancelledError:
+                        logger.info("TTS task successfully cancelled.")
+                    except Exception as e:
+                        logger.error(f"Error awaiting TTS task cancellation: {e}")
                 self.current_tts_task = None
 
             # Clear TTS playing state
@@ -409,7 +418,6 @@ class GemmaMultimodalProcessor:
 
                 # Create a streamer for token-by-token generation
                 from transformers import TextIteratorStreamer
-                from threading import Thread
 
                 streamer = TextIteratorStreamer(
                     self.processor.tokenizer,
@@ -427,7 +435,13 @@ class GemmaMultimodalProcessor:
                     streamer=streamer,
                 )
 
-                thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
+                def run_generation():
+                    try:
+                        self.model.generate(**generation_kwargs)
+                    except Exception as e:
+                        logger.error(f"Generation thread error: {e}")
+
+                thread = Thread(target=run_generation)
                 thread.start()
 
                 # Collect initial text until we have a complete sentence or enough content
@@ -437,29 +451,39 @@ class GemmaMultimodalProcessor:
                 has_sentence_end = False
 
                 # Collect the first sentence or minimum character count
-                for chunk in streamer:
-                    initial_text += chunk
+                try:
+                    for chunk in streamer:
+                        # Check for cancellation
+                        if asyncio.current_task().cancelled():
+                            logger.info("Gemma generation cancelled during streaming.")
+                            thread.join(timeout=1)  # Ensure the thread terminates if possible
+                            return None, None  # Signal cancellation
 
-                    # Check if we have a sentence end
-                    if sentence_end_pattern.search(chunk):
-                        has_sentence_end = True
-                        # If we have at least some content, break after sentence end
-                        if len(initial_text) >= min_chars / 2:
+                        initial_text += chunk
+
+                        # Check if we have a sentence end
+                        if sentence_end_pattern.search(chunk):
+                            has_sentence_end = True
+                            # If we have at least some content, break after sentence end
+                            if len(initial_text) >= min_chars / 2:
+                                break
+
+                        # If we have enough content, break
+                        if len(initial_text) >= min_chars and (has_sentence_end or "," in initial_text):
                             break
 
-                    # If we have enough content, break
-                    if len(initial_text) >= min_chars and (has_sentence_end or "," in initial_text):
-                        break
+                        # Safety check - if we've collected a lot of text without sentence end
+                        if len(initial_text) >= min_chars * 2:
+                            break
+                except asyncio.CancelledError:
+                    logger.info("Gemma streaming cancelled.")
+                    thread.join(timeout=1)
+                    return None, None
 
-                    # Safety check - if we've collected a lot of text without sentence end
-                    if len(initial_text) >= min_chars * 2:
-                        break
 
                 # Return initial text and the streamer for continued generation
                 self.generation_count += 1
                 logger.info(f"Gemma initial generation: '{initial_text}' ({len(initial_text)} chars)")
-
-
                 return streamer, initial_text
 
             except Exception as e:
@@ -555,27 +579,39 @@ class KokoroTTSProcessor:
 
             # Use the executor to run the TTS pipeline with minimal splitting
             # For initial text, we want to process it quickly with minimal splits
-            generator = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.pipeline(
+            async def run_tts():
+                return self.pipeline(
                     text,
                     voice=self.default_voice,
                     speed=1,
                     split_pattern=None  # No splitting for initial text to process faster
                 )
-            )
 
-            # Process all generated segments
-            for gs, ps, audio in generator:
-                audio_segments.append(audio)
+            try:
+                generator = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    run_tts
+                )
 
-            # Combine all audio segments
-            if audio_segments:
-                combined_audio = np.concatenate(audio_segments)
-                self.synthesis_count += 1
-                logger.info(f"Initial speech synthesis complete: {len(combined_audio)} samples")
-                return combined_audio
-            return None
+                # Process all generated segments
+                for gs, ps, audio in generator:
+                    # Check for cancellation after processing each segment
+                    if asyncio.current_task().cancelled():
+                        logger.info("TTS task cancelled during segment processing.")
+                        return None  # Return None to signal cancellation
+
+                    audio_segments.append(audio)
+
+                # Combine all audio segments
+                if audio_segments:
+                    combined_audio = np.concatenate(audio_segments)
+                    self.synthesis_count += 1
+                    logger.info(f"Initial speech synthesis complete: {len(combined_audio)} samples")
+                    return combined_audio
+                return None
+            except asyncio.CancelledError:
+                logger.info("TTS task was cancelled.")
+                return None
 
         except Exception as e:
             logger.error(f"Initial speech synthesis error: {e}")
@@ -594,27 +630,39 @@ class KokoroTTSProcessor:
 
             # Use the executor to run the TTS pipeline with comprehensive splitting
             # For remaining text, we want to process it with proper splits for better quality
-            generator = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.pipeline(
+            async def run_tts():
+                return self.pipeline(
                     text,
                     voice=self.default_voice,
                     speed=1,
                     split_pattern=r'[.!?。！？,，;；:]+'  # Comprehensive splitting for remaining text
                 )
-            )
 
-            # Process all generated segments
-            for gs, ps, audio in generator:
-                audio_segments.append(audio)
+            try:
+                generator = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    run_tts
+                )
 
-            # Combine all audio segments
-            if audio_segments:
-                combined_audio = np.concatenate(audio_segments)
-                self.synthesis_count += 1
-                logger.info(f"Remaining speech synthesis complete: {len(combined_audio)} samples")
-                return combined_audio
-            return None
+                # Process all generated segments
+                for gs, ps, audio in generator:
+                    # Check for cancellation after processing each segment
+                    if asyncio.current_task().cancelled():
+                        logger.info("TTS task cancelled during segment processing.")
+                        return None # Return None to signal cancellation
+
+                    audio_segments.append(audio)
+
+                # Combine all audio segments
+                if audio_segments:
+                    combined_audio = np.concatenate(audio_segments)
+                    self.synthesis_count += 1
+                    logger.info(f"Remaining speech synthesis complete: {len(combined_audio)} samples")
+                    return combined_audio
+                return None
+            except asyncio.CancelledError:
+                logger.info("TTS task was cancelled.")
+                return None
 
         except Exception as e:
             logger.error(f"Remaining speech synthesis error: {e}")
@@ -633,27 +681,39 @@ class KokoroTTSProcessor:
 
             # Use the executor to run the TTS pipeline
             # Updated split pattern to include Chinese punctuation marks
-            generator = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.pipeline(
+            async def run_tts():
+                return self.pipeline(
                     text,
                     voice=self.default_voice,
                     speed=1,
                     split_pattern=r'[.!?。！？]+'  # Added Chinese punctuation marks
                 )
-            )
 
-            # Process all generated segments
-            for gs, ps, audio in generator:
-                audio_segments.append(audio)
+            try:
+                generator = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    run_tts
+                )
 
-            # Combine all audio segments
-            if audio_segments:
-                combined_audio = np.concatenate(audio_segments)
-                self.synthesis_count += 1
-                logger.info(f"Speech synthesis complete: {len(combined_audio)} samples")
-                return combined_audio
-            return None
+                # Process all generated segments
+                for gs, ps, audio in generator:
+                    # Check for cancellation after processing each segment
+                    if asyncio.current_task().cancelled():
+                        logger.info("TTS task cancelled during segment processing.")
+                        return None # Return None to signal cancellation
+
+                    audio_segments.append(audio)
+
+                # Combine all audio segments
+                if audio_segments:
+                    combined_audio = np.concatenate(audio_segments)
+                    self.synthesis_count += 1
+                    logger.info(f"Speech synthesis complete: {len(combined_audio)} samples")
+                    return combined_audio
+                return None
+            except asyncio.CancelledError:
+                logger.info("TTS task was cancelled.")
+                return None
 
         except Exception as e:
             logger.error(f"Speech synthesis error: {e}")
@@ -687,10 +747,15 @@ async def handle_client(websocket):
     async def collect_remaining_text(streamer):
         collected_text = ""
         try:
-            for chunk in streamer:
+            async for chunk in streamer:
+                # Check for cancellation
+                if asyncio.current_task().cancelled():
+                    logger.info("Remaining text collection cancelled.")
+                    return None
                 collected_text += chunk
         except asyncio.CancelledError:
-            logger.info("Remaining text collection cancelled.")
+            logger.info("Task cancelled - collection interrupted.")
+            return None
         return collected_text
 
     async def synthesize_remaining(remaining_text):
@@ -731,6 +796,11 @@ async def handle_client(websocket):
                 await websocket.send(json.dumps({"audio": base64_audio}))
 
             remaining_text = await collect_remaining_text(streamer)
+
+            if remaining_text is None:
+                logger.info("Remaining text collection cancelled, skipping TTS.")
+                return
+
             remaining_audio = await synthesize_remaining(remaining_text)
 
             if remaining_audio is not None:
@@ -750,6 +820,10 @@ async def handle_client(websocket):
     async def detect_speech_segments():
         try:
             while True:
+                # Check for cancellation before retrieving next segment
+                if asyncio.current_task().cancelled():
+                    logger.info("Speech detection cancelled.")
+                    break
                 speech_segment = await detector.get_next_segment()
                 if speech_segment:
                     await detector.cancel_current_tasks()
@@ -765,6 +839,10 @@ async def handle_client(websocket):
     async def receive_audio_and_images():
         try:
             async for message in websocket:
+                # Check for cancellation before processing each message
+                if asyncio.current_task().cancelled():
+                    logger.info("Data reception cancelled.")
+                    break
                 try:
                     data = json.loads(message)
 
@@ -791,6 +869,10 @@ async def handle_client(websocket):
     async def send_keepalive():
         try:
             while True:
+                # Check for cancellation before sending ping
+                if asyncio.current_task().cancelled():
+                    logger.info("Keepalive task cancelled.")
+                    break
                 await websocket.ping()
                 await asyncio.sleep(20)  # Send ping every 20 seconds
         except Exception:
@@ -799,10 +881,16 @@ async def handle_client(websocket):
     try:
         await websocket.recv()
         logger.info("Client connected")
+
+        # Create tasks and store them for potential cancellation
+        receive_task = asyncio.create_task(receive_audio_and_images())
+        detect_task = asyncio.create_task(detect_speech_segments())
+        keepalive_task = asyncio.create_task(send_keepalive())
+
         await asyncio.gather(
-            receive_audio_and_images(),
-            detect_speech_segments(),
-            send_keepalive(),
+            receive_task,
+            detect_task,
+            keepalive_task
         )
     except websockets.exceptions.ConnectionClosed:
         logger.info("Client disconnected.")
@@ -811,7 +899,16 @@ async def handle_client(websocket):
     finally:
         logger.info("Cleaning up resources...")
         await detector.set_tts_playing(False)
-        await detector.cancel_current_tasks()
+        await detector.cancel_current_tasks("Client disconnected")
+
+        # Cancel remaining tasks if they are still running
+        if 'receive_task' in locals() and not receive_task.done():
+            receive_task.cancel("Cleanup after client disconnect")
+        if 'detect_task' in locals() and not detect_task.done():
+            detect_task.cancel("Cleanup after client disconnect")
+        if 'keepalive_task' in locals() and not keepalive_task.done():
+            keepalive_task.cancel("Cleanup after client disconnect")
+
 
 async def main():
     """Main function to start the WebSocket server"""
