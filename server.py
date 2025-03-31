@@ -136,8 +136,9 @@ class WhisperTranscriber:
         try:
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             if len(audio_array) < 500:
+                logger.info("Audio too short for transcription")
                 return ""
-            result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"input_features": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"}))
+            result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"raw": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"}))
             text = result.get("text", "").strip()
             self.transcription_count += 1
             logger.info(f"Transcription: '{text}'")
