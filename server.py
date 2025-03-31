@@ -480,6 +480,7 @@ class GemmaMultimodalProcessor(metaclass=SingletonMeta):
              # thread.join(timeout=1.0) # Add timeout to join
 
 # --- Kokoro TTS Processor ---
+
 class KokoroTTSProcessor(metaclass=SingletonMeta):
     """Handles text-to-speech conversion using Kokoro."""
     def __init__(self):
@@ -487,12 +488,16 @@ class KokoroTTSProcessor(metaclass=SingletonMeta):
         logger.info("Initializing KokoroTTSProcessor (sync part)...")
         try:
             # Synchronous call
-            self.pipeline = KPipeline(lang_code='en')
-            self.default_voice = 'en_us_sarah'
+            # --- FIX: Use the correct language code ---
+            # self.pipeline = KPipeline(lang_code='en') # INCORRECT
+            self.pipeline = KPipeline(lang_code='a')  # CORRECT for American English
+            # --- END FIX ---
+
+            # Ensure voice matches the selected language code 'a'
+            self.default_voice = 'en_us_sarah' # This seems like a valid US voice name
             self.sample_rate = 24000 # Kokoro default
-            logger.info(f"KokoroTTSProcessor sync initialization complete with voice {self.default_voice}.")
+            logger.info(f"KokoroTTSProcessor sync initialization complete with lang_code='a', voice='{self.default_voice}'.")
             self.synthesis_count = 0
-            # REMOVED: self._loop = asyncio.get_event_loop() # Error!
         except Exception as e:
             logger.error(f"Error during sync Kokoro TTS initialization: {e}", exc_info=True)
             self.pipeline = None # Ensure pipeline is None on error
