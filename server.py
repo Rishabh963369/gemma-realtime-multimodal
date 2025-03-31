@@ -136,7 +136,7 @@ class AudioSegmentDetector:
                 self._current_tts_task = tts_task
 
 
-    async def add_audio(self, audio_bytes: bytes):
+async def add_audio(self, audio_bytes: bytes):
         """Add audio data to the buffer and check for speech segments"""
         if not audio_bytes:
             return None
@@ -173,15 +173,13 @@ class AudioSegmentDetector:
                 elif self.is_speech_active:
                     current_speech_len_bytes = buffer_len - self.speech_start_idx
 
-                    if energy > self.energy_threshold:
-                        # Continued speech, reset silence counter
-                        self.silence_counter = 0
-                    else:
+                    # First, check if silence ends the segment
+                    if energy <= self.energy_threshold:
                         # Potential end of speech - accumulating silence
-                        self.silence_counter += len(audio_array) # Add samples from current chunk
+                        self.silence_counter += len(audio_bytes) # Use bytes length here to match buffer logic
 
                         # Check if enough silence to end speech segment
-                        if self.silence_counter >= self.silence_samples:
+                        if self.silence_counter >= self.silence_samples * 2: # Compare silence bytes counter with threshold in bytes
                             speech_end_idx = buffer_len - self.silence_counter
                             # Ensure start index is not after end index
                             if self.speech_start_idx < speech_end_idx:
@@ -189,32 +187,40 @@ class AudioSegmentDetector:
                                 segment_duration_s = len(speech_segment_bytes) / 2 / self.sample_rate
 
                                 # Reset for next speech detection
-                                self.is_speech_active = False
+                                is_speech_active_before_reset = self.is_speech_active # Store state before reset
+                                self.is_speech_active = False # ****** SET SPEECH INACTIVE HERE ******
                                 self.silence_counter = 0
-                                # Trim buffer efficiently: keep only audio *after* the detected silence
+                                # Trim buffer efficiently: keep only audio *after* the detected silence start
                                 self.audio_buffer = self.audio_buffer[speech_end_idx:]
                                 self.speech_start_idx = 0 # Reset relative start index
 
-                                # Only process if speech segment is long enough
-                                if len(speech_segment_bytes) >= self.min_speech_samples * 2: # * 2 for 16-bit
+                                # Only process if speech segment is long enough and speech was previously active
+                                if is_speech_active_before_reset and len(speech_segment_bytes) >= self.min_speech_samples * 2: # * 2 for 16-bit
                                     self.segments_detected += 1
                                     logger.info(f"Speech segment detected (silence): {segment_duration_s:.2f}s")
                                     await self.segment_queue.put(speech_segment_bytes)
-                                    return speech_segment_bytes # Indicate segment found
-                                else:
+                                    # No return here, let buffer maintenance run
+                                elif is_speech_active_before_reset:
                                     logger.info(f"Speech segment too short ({segment_duration_s:.2f}s), discarding.")
+                                # else: speech wasn't active, nothing to process (shouldn't happen often here)
+
                             else:
                                 # Edge case: silence detected but indices are wrong, reset state
                                 logger.warning("Speech end detected with invalid indices, resetting.")
                                 self.is_speech_active = False
                                 self.silence_counter = 0
                                 self.speech_start_idx = 0
-                                self.audio_buffer = self.audio_buffer[buffer_len - self.silence_counter:] # Keep only silence buffer
+                                # Keep only the recent silence part
+                                self.audio_buffer = self.audio_buffer[max(0, buffer_len - self.silence_counter):]
 
+                    else: # energy > self.energy_threshold
+                        # Continued speech, reset silence counter
+                        self.silence_counter = 0
 
-                    # Check if speech segment exceeds maximum duration (only if speech is active)
-                    # Multiply max_speech_samples by 2 for bytes
-                    elif current_speech_len_bytes >= self.max_speech_samples * 2:
+                    # --- Check for Max Duration ---
+                    # This check happens *after* the energy/silence check for the current chunk
+                    # It should only trigger if speech is *still* considered active (i.e., silence didn't just end it)
+                    if self.is_speech_active and current_speech_len_bytes >= self.max_speech_samples * 2:
                         # Extract the max duration segment
                         speech_segment_bytes = bytes(self.audio_buffer[self.speech_start_idx : self.speech_start_idx + self.max_speech_samples * 2])
                         segment_duration_s = len(speech_segment_bytes) / 2 / self.sample_rate
@@ -222,29 +228,33 @@ class AudioSegmentDetector:
                         # Update buffer: keep audio *after* the extracted segment
                         new_start_idx = self.speech_start_idx + self.max_speech_samples * 2
                         self.audio_buffer = self.audio_buffer[new_start_idx:]
+
                         # Reset relative start index for the remaining buffer content
                         self.speech_start_idx = 0
                         # Reset silence counter as we forced a segment end
                         self.silence_counter = 0
-                        # Keep is_speech_active = True, as speech likely continues
+                        # Keep is_speech_active = True, as speech likely continues immediately after
 
                         self.segments_detected += 1
                         logger.info(f"Max duration speech segment extracted: {segment_duration_s:.2f}s")
                         await self.segment_queue.put(speech_segment_bytes)
-                        return speech_segment_bytes # Indicate segment found
+                        # No return here, let buffer maintenance run
+
 
             # --- Buffer Maintenance ---
             # Limit buffer size to avoid excessive memory usage
             # Keep roughly max_speech_duration + silence_duration worth of audio
             max_buffer_len = (self.max_speech_samples + self.silence_samples) * 2 # * 2 bytes
-            if buffer_len > max_buffer_len:
-                over = buffer_len - max_buffer_len
+            current_buffer_len = len(self.audio_buffer)
+            if current_buffer_len > max_buffer_len:
+                over = current_buffer_len - max_buffer_len
                 self.audio_buffer = self.audio_buffer[over:]
-                # Adjust speech_start_idx relative to the truncated buffer
-                self.speech_start_idx = max(0, self.speech_start_idx - over)
+                # Adjust speech_start_idx relative to the truncated buffer ONLY if speech is active
+                if self.is_speech_active:
+                    self.speech_start_idx = max(0, self.speech_start_idx - over)
 
 
-        return None # No segment completed in this chunk
+        return None # Indicate no segment completed *and returned* in this specific call
 
 
     async def get_next_segment(self):
