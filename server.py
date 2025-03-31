@@ -574,27 +574,34 @@ class KokoroTTSProcessor:
         try:
             logger.info(f"Synthesizing initial speech for text: '{text}'")
 
-            # Run TTS in a thread pool to avoid blocking
-            audio_segments = []
-
             # Use the executor to run the TTS pipeline with minimal splitting
             # For initial text, we want to process it quickly with minimal splits
-            async def run_tts():
-                return self.pipeline(
-                    text,
-                    voice=self.default_voice,
-                    speed=1,
-                    split_pattern=None  # No splitting for initial text to process faster
-                )
+
+            def run_tts():
+                try:
+                    return self.pipeline(
+                        text,
+                        voice=self.default_voice,
+                        speed=1,
+                        split_pattern=None  # No splitting for initial text to process faster
+                    )
+                except Exception as e:
+                    logger.error(f"TTS pipeline error in thread: {e}")
+                    return None
 
             try:
-                generator = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    run_tts
-                )
+                generator = await asyncio.get_event_loop().run_in_executor(None, run_tts)
 
+                # Await the generator
+                result = await generator
+
+                if result is None:
+                    logger.warning("TTS generator returned None.")
+                    return None
+
+                audio_segments = []
                 # Process all generated segments
-                for gs, ps, audio in generator:
+                for gs, ps, audio in result:
                     # Check for cancellation after processing each segment
                     if asyncio.current_task().cancelled():
                         logger.info("TTS task cancelled during segment processing.")
@@ -625,31 +632,38 @@ class KokoroTTSProcessor:
         try:
             logger.info(f"Synthesizing remaining speech for text: '{text[:50]}...' if len(text) > 50 else text")
 
-            # Run TTS in a thread pool to avoid blocking
-            audio_segments = []
-
             # Use the executor to run the TTS pipeline with comprehensive splitting
             # For remaining text, we want to process it with proper splits for better quality
-            async def run_tts():
-                return self.pipeline(
-                    text,
-                    voice=self.default_voice,
-                    speed=1,
-                    split_pattern=r'[.!?。！？,，;；:]+'  # Comprehensive splitting for remaining text
-                )
+
+            def run_tts():
+                try:
+                    return self.pipeline(
+                        text,
+                        voice=self.default_voice,
+                        speed=1,
+                        split_pattern=r'[.!?。！？,，;；:]+'  # Comprehensive splitting for remaining text
+                    )
+                except Exception as e:
+                    logger.error(f"TTS pipeline error in thread: {e}")
+                    return None
 
             try:
-                generator = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    run_tts
-                )
+                generator = await asyncio.get_event_loop().run_in_executor(None, run_tts)
 
+                # Await the generator
+                result = await generator
+
+                if result is None:
+                    logger.warning("TTS generator returned None.")
+                    return None
+
+                audio_segments = []
                 # Process all generated segments
-                for gs, ps, audio in generator:
+                for gs, ps, audio in result:
                     # Check for cancellation after processing each segment
                     if asyncio.current_task().cancelled():
                         logger.info("TTS task cancelled during segment processing.")
-                        return None # Return None to signal cancellation
+                        return None  # Return None to signal cancellation
 
                     audio_segments.append(audio)
 
@@ -676,27 +690,35 @@ class KokoroTTSProcessor:
         try:
             logger.info(f"Synthesizing speech for text: '{text[:50]}...' if len(text) > 50 else text")
 
-            # Run TTS in a thread pool to avoid blocking
-            audio_segments = []
-
             # Use the executor to run the TTS pipeline
             # Updated split pattern to include Chinese punctuation marks
-            async def run_tts():
-                return self.pipeline(
-                    text,
-                    voice=self.default_voice,
-                    speed=1,
-                    split_pattern=r'[.!?。！？]+'  # Added Chinese punctuation marks
-                )
+
+            def run_tts():
+                try:
+                    return self.pipeline(
+                        text,
+                        voice=self.default_voice,
+                        speed=1,
+                        split_pattern=r'[.!?。！？]+'  # Added Chinese punctuation marks
+                    )
+                except Exception as e:
+                    logger.error(f"TTS pipeline error in thread: {e}")
+                    return None
 
             try:
-                generator = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    run_tts
-                )
+                generator = await asyncio.get_event_loop().run_in_executor(None, run_tts)
+                # Await the generator
+                result = await generator
+
+                if result is None:
+                    logger.warning("TTS generator returned None.")
+                    return None
+
+
+                audio_segments = []
 
                 # Process all generated segments
-                for gs, ps, audio in generator:
+                for gs, ps, audio in result:
                     # Check for cancellation after processing each segment
                     if asyncio.current_task().cancelled():
                         logger.info("TTS task cancelled during segment processing.")
@@ -744,17 +766,21 @@ async def handle_client(websocket):
             logger.error(f"Error synthesizing speech: {e}")
             return None
 
-    async def collect_remaining_text(streamer):
+    def collect_remaining_text(streamer):
         collected_text = ""
         try:
-            async for chunk in streamer:
-                # Check for cancellation
+            for chunk in streamer:
+                # Check for cancellation - crucial *within* the thread iteration
                 if asyncio.current_task().cancelled():
                     logger.info("Remaining text collection cancelled.")
-                    return None
+                    return None  # Return None to signal cancellation
+
                 collected_text += chunk
         except asyncio.CancelledError:
-            logger.info("Task cancelled - collection interrupted.")
+            logger.info("Text collection cancelled.")
+            return None
+        except Exception as e:
+            logger.error(f"Error collecting remaining text: {e}")
             return None
         return collected_text
 
@@ -795,7 +821,13 @@ async def handle_client(websocket):
                 base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
                 await websocket.send(json.dumps({"audio": base64_audio}))
 
-            remaining_text = await collect_remaining_text(streamer)
+            # Collect the rest of the text in the same thread.
+            remaining_text = await asyncio.get_event_loop().run_in_executor(
+                None,
+                collect_remaining_text,
+                streamer
+            )
+
 
             if remaining_text is None:
                 logger.info("Remaining text collection cancelled, skipping TTS.")
@@ -865,6 +897,7 @@ async def handle_client(websocket):
             logger.info("Connection closed during data reception.")
         except Exception as e:
             logger.error(f"Error in data reception loop: {e}")
+
 
     async def send_keepalive():
         try:
