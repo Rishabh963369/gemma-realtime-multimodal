@@ -3,7 +3,7 @@ import json
 import websockets
 import base64
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, AutoProcessor, GemmaForConditionalGeneration # Corrected import
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, AutoProcessor, Gemma3ForConditionalGeneration
 import numpy as np
 import logging
 import sys
