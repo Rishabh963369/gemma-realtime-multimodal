@@ -198,11 +198,11 @@ class WhisperTranscriber:
         
         # Load model
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_id,
-            attn_implementation="flash_attention_2",
+            model_id, 
             torch_dtype=self.torch_dtype,
+            low_cpu_mem_usage=True, 
+            use_safetensors=True
         )
-
         self.model.to(self.device)
         
         # Load processor
@@ -281,10 +281,9 @@ class GemmaMultimodalProcessor:
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
             device_map="auto",
-            load_in_4bit=True,  # More efficient than 8-bit
+            load_in_8bit=True,  # Enable 8-bit quantization
             torch_dtype=torch.bfloat16
         )
-
         
         # Load processor
         self.processor = AutoProcessor.from_pretrained(model_id)
@@ -417,11 +416,11 @@ class GemmaMultimodalProcessor:
                 # Start generation in a separate thread
                 generation_kwargs = dict(
                     **inputs,
-                    max_new_tokens=64,  # Reduced from 128
-                    temperature=0.4,     # More deterministic
-                    top_p=0.9,
-                    repetition_penalty=1.2,
-
+                    max_new_tokens=128,
+                    do_sample=True,
+                    temperature=0.7,
+                    use_cache=True,
+                    streamer=streamer,
                 )
                 
                 thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
