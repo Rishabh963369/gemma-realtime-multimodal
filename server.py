@@ -533,27 +533,47 @@ class KokoroTTSProcessor:
         self.is_ready = False
         self.target_sample_rate = None # Store expected sample rate
         try:
-            # Check Kokoro's expected language codes and voices
-            self.pipeline = KPipeline(lang_code='en') # Assuming English focus
-            self.default_voice = 'en-US-Standard-F' # Example standard voice, check available ones
+            # --- CORRECTED LINE ---
+            # Kokoro uses specific codes, not ISO codes. 'a' is American English.
+            # Check the LANG_CODES from the error message for other options.
+            kokoro_lang_code = 'a' # Use 'a' for American English or 'b' for British
+            logger.info(f"Attempting to initialize Kokoro with lang_code: '{kokoro_lang_code}'")
+            self.pipeline = KPipeline(lang_code=kokoro_lang_code)
+
+            # --- Voice Selection ---
+            # Ensure the selected voice is compatible with the chosen lang_code.
+            # 'en-US-Standard-F' seems appropriate for lang_code='a'.
+            # If using lang_code='b', you might need a different voice.
+            self.default_voice = 'en-US-Standard-F' # Check Kokoro docs/source for available voices per language
+            logger.info(f"Selected Kokoro default voice: {self.default_voice}")
+
             # Attempt a dummy synthesis to check readiness and get sample rate
+            logger.info(f"Performing dummy synthesis test with voice: {self.default_voice}")
             dummy_audio = self.pipeline.synthesize("test", voice=self.default_voice)
+
             if isinstance(dummy_audio, np.ndarray) and dummy_audio.size > 0:
                  self.target_sample_rate = self.pipeline.target_sample_rate # Store rate
-                 logger.info(f"Kokoro TTS processor initialized successfully. Voice: {self.default_voice}, Rate: {self.target_sample_rate}Hz")
+                 logger.info(f"Kokoro TTS processor initialized successfully. Language Code: '{kokoro_lang_code}', Voice: {self.default_voice}, Rate: {self.target_sample_rate}Hz")
                  self.is_ready = True
                  self.synthesis_count = 0
             else:
-                 logger.error("Kokoro TTS dummy synthesis failed.")
+                 logger.error(f"Kokoro TTS dummy synthesis failed for lang_code '{kokoro_lang_code}' and voice '{self.default_voice}'. Output was invalid or empty.")
                  self.pipeline = None # Mark as unusable
 
         except ImportError:
-             logger.error("Kokoro library not found. Please install it.")
+             logger.error("Kokoro library not found. Please install it: pip install kokoro-tts")
+        except AssertionError as ae:
+             # Catch the specific error to provide more context if it happens again
+             logger.error(f"FATAL: Kokoro language code assertion failed: {ae}", exc_info=True)
+             logger.error(f"Check that the chosen lang_code ('{kokoro_lang_code}') is valid according to Kokoro's requirements.")
+             self.pipeline = None
         except Exception as e:
-            logger.error(f"Error initializing Kokoro TTS: {e}", exc_info=True)
+            # Catch other potential errors during initialization or dummy synthesis
+            logger.error(f"Error initializing Kokoro TTS or during dummy synthesis: {e}", exc_info=True)
             self.pipeline = None
 
     async def synthesize_speech(self, text):
+        # (Rest of the synthesize_speech method remains the same)
         if not self.is_ready or not text:
             logger.warning(f"TTS skipped. Ready: {self.is_ready}, Text provided: {bool(text)}")
             return None
@@ -591,7 +611,6 @@ class KokoroTTSProcessor:
             logger.error(f"Speech synthesis error: {e}\n{traceback.format_exc()}")
             # torch.cuda.empty_cache() # Optional
             return None
-
 
 # --- WebSocket Handler & Pipeline ---
 
