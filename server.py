@@ -4,7 +4,7 @@ import websockets
 import base64
 import torch
 # Corrected Gemma import if using Gemma 2
-ffrom transformers import (
+from transformers import (
     AutoModelForSpeechSeq2Seq,
     AutoProcessor,
     pipeline,
