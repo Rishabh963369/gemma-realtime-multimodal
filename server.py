@@ -3,14 +3,14 @@ import json
 import websockets
 import base64
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
 import numpy as np
 import logging
 import sys
 import io
 from PIL import Image
 import time
-from kokoro import KPipeline  # Assuming this is a custom TTS library
+from kokoro import KPipeline  # Assuming this is your custom TTS library
 
 # Configure logging
 logging.basicConfig(
@@ -32,7 +32,7 @@ class AudioSegmentDetector:
         self.silence_counter = 0
         self.speech_start_idx = 0
         self.lock = asyncio.Lock()
-        self.segment_queue = asyncio.Queue(maxsize=5)  # Reduced queue size for lower latency
+        self.segment_queue = asyncio.Queue(maxsize=5)
         self.segments_detected = 0
         self.tts_playing = False
         self.tts_lock = asyncio.Lock()
@@ -109,7 +109,7 @@ class AudioSegmentDetector:
 
     async def get_next_segment(self):
         try:
-            return await asyncio.wait_for(self.segment_queue.get(), timeout=0.02)  # Reduced timeout
+            return await asyncio.wait_for(self.segment_queue.get(), timeout=0.02)
         except asyncio.TimeoutError:
             return None
 
@@ -125,7 +125,7 @@ class WhisperTranscriber:
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.torch_dtype = torch.float16 if self.device != "cpu" else torch.float32
-        model_id = "distil-whisper/distil-large-v2"  # Faster Whisper model
+        model_id = "distil-whisper/distil-large-v2"
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True).to(self.device)
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.pipe = pipeline(
@@ -135,7 +135,7 @@ class WhisperTranscriber:
             feature_extractor=self.processor.feature_extractor,
             torch_dtype=self.torch_dtype,
             device=self.device,
-            model_kwargs={"use_flash_attention_2": True}  # Enable Flash Attention for speed
+            model_kwargs={"use_flash_attention_2": True}
         )
         self.transcription_count = 0
         logger.info("Distil-Whisper model loaded")
@@ -143,7 +143,7 @@ class WhisperTranscriber:
     async def transcribe(self, audio_bytes, sample_rate=16000):
         try:
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-            if len(audio_array) < 300:  # Reduced minimum length
+            if len(audio_array) < 300:
                 logger.info("Audio too short for transcription")
                 return ""
             result = await asyncio.get_event_loop().run_in_executor(
@@ -169,15 +169,20 @@ class GemmaMultimodalProcessor:
 
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        model_id = "google/gemma-2b-it"  # Smaller, faster model
-        self.model = AutoModelForCausalLM.from_pretrained(model_id, device_map="auto", torch_dtype=torch.bfloat16)
+        model_id = "google/gemma-7b-it"  # Using Gemma-7B-IT for better responses
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            device_map="auto",
+            torch_dtype=torch.bfloat16,
+            load_in_8bit=True  # 8-bit quantization for speed
+        )
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
         self.last_image = None
         self.last_image_timestamp = 0
         self.lock = asyncio.Lock()
         self.message_history = []
         self.generation_count = 0
-        logger.info("Gemma-2B model loaded")
+        logger.info("Gemma-7B-IT model loaded with 8-bit quantization")
 
     async def set_image(self, image_data):
         async with self.lock:
@@ -186,7 +191,7 @@ class GemmaMultimodalProcessor:
                     logger.warning("Invalid or empty image data received")
                     return False
                 image = Image.open(io.BytesIO(image_data))
-                resized_image = image.resize((int(image.size[0] * 0.5), int(image.size[1] * 0.5)), Image.Resampling.LANCZOS)  # Faster resize
+                resized_image = image.resize((int(image.size[0] * 0.5), int(image.size[1] * 0.5)), Image.Resampling.LANCZOS)
                 self.message_history = []
                 self.last_image = resized_image
                 self.last_image_timestamp = time.time()
@@ -202,6 +207,8 @@ class GemmaMultimodalProcessor:
             prompt += f"[Image provided]\nUser: {text}"
         else:
             prompt += f"User: {text}"
+        if self.message_history:
+            prompt += "\nConversation history:\n" + "\n".join([f"{msg['role']}: {msg['content']}" for msg in self.message_history])
         return prompt
 
     def _update_history(self, user_text, assistant_response):
@@ -216,7 +223,7 @@ class GemmaMultimodalProcessor:
                 streamer = TextIteratorStreamer(self.tokenizer, skip_special_tokens=True)
                 generation_kwargs = dict(
                     **inputs,
-                    max_new_tokens=50,  # Reduced for faster response
+                    max_new_tokens=50,
                     do_sample=True,
                     temperature=0.6,
                     use_cache=True,
@@ -227,7 +234,7 @@ class GemmaMultimodalProcessor:
                 initial_text = ""
                 for chunk in streamer:
                     initial_text += chunk
-                    if len(initial_text) > 15 or "." in chunk or "," in chunk:  # Faster cutoff
+                    if len(initial_text) > 15 or "." in chunk or "," in chunk:
                         break
                 self.generation_count += 1
                 logger.info(f"Generated initial text: '{initial_text}'")
@@ -258,7 +265,7 @@ class KokoroTTSProcessor:
             audio_segments = []
             generator = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.pipeline(text, voice=self.default_voice, speed=1.2, split_pattern=r'[.,!?。！？]+')  # Increased speed
+                lambda: self.pipeline(text, voice=self.default_voice, speed=1.2, split_pattern=r'[.,!?。！？]+')
             )
             for _, _, audio in generator:
                 audio_segments.append(audio)
@@ -327,7 +334,7 @@ async def handle_client(websocket):
                 await detector.cancel_current_tasks()
                 task = asyncio.create_task(process_speech_segment(speech_segment))
                 await detector.set_current_tasks(tts_task=task)
-            await asyncio.sleep(0.005)  # Reduced sleep time
+            await asyncio.sleep(0.005)
 
     async def receive_audio_and_images():
         async for message in websocket:
@@ -351,7 +358,7 @@ async def handle_client(websocket):
     async def send_keepalive():
         while True:
             await websocket.ping()
-            await asyncio.sleep(15)  # Slightly reduced interval
+            await asyncio.sleep(15)
 
     try:
         await websocket.recv()
