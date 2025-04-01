@@ -43,6 +43,7 @@ class AudioSegmentDetector:
     async def set_tts_playing(self, is_playing):
         async with self.tts_lock:
             self.tts_playing = is_playing
+            logger.info(f"TTS playing status set to: {is_playing}")
 
     async def cancel_current_tasks(self):
         async with self.task_lock:
@@ -63,14 +64,17 @@ class AudioSegmentDetector:
             while not self.segment_queue.empty():
                 await self.segment_queue.get()
             await self.set_tts_playing(False)
+            logger.info("Current tasks cancelled and segment queue cleared")
 
     async def set_current_tasks(self, generation_task=None, tts_task=None):
         async with self.task_lock:
             self.current_generation_task = generation_task
             self.current_tts_task = tts_task
+            logger.info("Current tasks updated")
 
     async def add_audio(self, audio_bytes):
         async with self.lock:
+            start_time = time.time()
             self.audio_buffer.extend(audio_bytes)
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             if len(audio_array) > 0:
@@ -93,7 +97,9 @@ class AudioSegmentDetector:
                             self.audio_buffer = self.audio_buffer[speech_end_idx:]
                             if len(speech_segment) >= self.min_speech_samples * 2:
                                 self.segments_detected += 1
-                                logger.info(f"Speech segment detected: {len(speech_segment) / 2 / self.sample_rate:.2f}s")
+                                duration = len(speech_segment) / 2 / self.sample_rate
+                                end_time = time.time()
+                                logger.info(f"Speech segment detected: {duration:.2f}s (detection took {end_time - start_time:.3f}s)")
                                 await self.cancel_current_tasks()
                                 await self.segment_queue.put(speech_segment)
                                 return speech_segment
@@ -101,16 +107,26 @@ class AudioSegmentDetector:
                             speech_segment = bytes(self.audio_buffer[self.speech_start_idx:self.speech_start_idx + self.max_speech_samples * 2])
                             self.speech_start_idx += self.max_speech_samples * 2
                             self.segments_detected += 1
-                            logger.info(f"Max duration speech segment: {len(speech_segment) / 2 / self.sample_rate:.2f}s")
+                            duration = len(speech_segment) / 2 / self.sample_rate
+                            end_time = time.time()
+                            logger.info(f"Max duration speech segment: {duration:.2f}s (detection took {end_time - start_time:.3f}s)")
                             await self.cancel_current_tasks()
                             await self.segment_queue.put(speech_segment)
                             return speech_segment
+            end_time = time.time()
+            logger.info(f"Audio processing completed in {end_time - start_time:.3f}s, no segment detected")
         return None
 
     async def get_next_segment(self):
+        start_time = time.time()
         try:
-            return await asyncio.wait_for(self.segment_queue.get(), timeout=0.05)
+            segment = await asyncio.wait_for(self.segment_queue.get(), timeout=0.05)
+            end_time = time.time()
+            logger.info(f"Next segment retrieved in {end_time - start_time:.3f}s")
+            return segment
         except asyncio.TimeoutError:
+            end_time = time.time()
+            logger.info(f"No segment available after {end_time - start_time:.3f}s")
             return None
 
 class WhisperTranscriber:
@@ -133,6 +149,8 @@ class WhisperTranscriber:
         logger.info("Whisper model loaded")
 
     async def transcribe(self, audio_bytes, sample_rate=16000):
+        start_time = time.time()
+        logger.info(f"Starting transcription for audio of length {len(audio_bytes) / 2 / sample_rate:.2f}s")
         try:
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             if len(audio_array) < 500:
@@ -141,10 +159,12 @@ class WhisperTranscriber:
             result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"raw": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"}))
             text = result.get("text", "").strip()
             self.transcription_count += 1
-            logger.info(f"Transcription: '{text}'")
+            end_time = time.time()
+            logger.info(f"Transcription completed in {end_time - start_time:.3f}s: '{text}'")
             return text
         except Exception as e:
-            logger.error(f"Transcription error: {e}")
+            end_time = time.time()
+            logger.error(f"Transcription error after {end_time - start_time:.3f}s: {e}")
             return ""
 
 class GemmaMultimodalProcessor:
@@ -170,6 +190,7 @@ class GemmaMultimodalProcessor:
 
     async def set_image(self, image_data):
         async with self.lock:
+            start_time = time.time()
             try:
                 if not image_data or len(image_data) < 100:
                     logger.warning("Invalid or empty image data received")
@@ -179,10 +200,12 @@ class GemmaMultimodalProcessor:
                 self.message_history = []
                 self.last_image = resized_image
                 self.last_image_timestamp = time.time()
-                logger.info("Image set successfully")
+                end_time = time.time()
+                logger.info(f"Image set successfully in {end_time - start_time:.3f}s")
                 return True
             except Exception as e:
-                logger.error(f"Error processing image: {str(e)}")
+                end_time = time.time()
+                logger.error(f"Error processing image after {end_time - start_time:.3f}s: {str(e)}")
                 return False
 
     def _build_messages(self, text):
@@ -196,9 +219,12 @@ class GemmaMultimodalProcessor:
 
     def _update_history(self, user_text, assistant_response):
         self.message_history = [{"role": "user", "content": [{"type": "text", "text": user_text}]}, {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}]
+        logger.info(f"Message history updated with user input: '{user_text}' and response: '{assistant_response}'")
 
     async def generate_streaming(self, text):
         async with self.lock:
+            start_time = time.time()
+            logger.info(f"Starting Gemma3 generation for input: '{text}'")
             try:
                 messages = self._build_messages(text)
                 inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
@@ -213,10 +239,12 @@ class GemmaMultimodalProcessor:
                     if len(initial_text) > 20 or "." in chunk or "," in chunk:
                         break
                 self.generation_count += 1
-                logger.info(f"Generated initial text: '{initial_text}'")
+                end_time = time.time()
+                logger.info(f"Gemma3 initial generation completed in {end_time - start_time:.3f}s: '{initial_text}'")
                 return streamer, initial_text
             except Exception as e:
-                logger.error(f"Gemma streaming error: {e}")
+                end_time = time.time()
+                logger.error(f"Gemma streaming error after {end_time - start_time:.3f}s: {e}")
                 return None, f"Sorry, I couldn’t process that due to an error."
 
 class KokoroTTSProcessor:
@@ -236,7 +264,10 @@ class KokoroTTSProcessor:
 
     async def synthesize_speech(self, text):
         if not text or not self.pipeline:
+            logger.info("No text or pipeline available for TTS synthesis")
             return None
+        start_time = time.time()
+        logger.info(f"Starting TTS synthesis for text: '{text}'")
         try:
             audio_segments = []
             generator = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipeline(text, voice=self.default_voice, speed=1, split_pattern=r'[.!?。！？]+'))
@@ -245,11 +276,15 @@ class KokoroTTSProcessor:
             if audio_segments:
                 combined_audio = np.concatenate(audio_segments)
                 self.synthesis_count += 1
-                logger.info(f"TTS synthesized: {len(combined_audio)} samples")
+                end_time = time.time()
+                logger.info(f"TTS synthesis completed in {end_time - start_time:.3f}s: {len(combined_audio)} samples")
                 return combined_audio
+            end_time = time.time()
+            logger.info(f"No audio generated for TTS in {end_time - start_time:.3f}s")
             return None
         except Exception as e:
-            logger.error(f"TTS error: {e}")
+            end_time = time.time()
+            logger.error(f"TTS error after {end_time - start_time:.3f}s: {e}")
             return None
 
 async def handle_client(websocket):
@@ -259,6 +294,8 @@ async def handle_client(websocket):
     tts_processor = KokoroTTSProcessor.get_instance()
 
     async def process_speech_segment(speech_segment):
+        segment_start_time = time.time()
+        logger.info(f"Starting processing for speech segment of length {len(speech_segment) / 2 / detector.sample_rate:.2f}s")
         try:
             transcription = await transcriber.transcribe(speech_segment)
             if not transcription or not any(c.isalnum() for c in transcription):
@@ -282,6 +319,7 @@ async def handle_client(websocket):
             remaining_text = ""
             for chunk in streamer:
                 remaining_text += chunk
+            logger.info(f"Remaining text generated: '{remaining_text}'")
             remaining_audio = await tts_processor.synthesize_speech(remaining_text)
             if remaining_audio is not None:
                 audio_bytes = (remaining_audio * 32767).astype(np.int16).tobytes()
@@ -289,6 +327,8 @@ async def handle_client(websocket):
             else:
                 logger.error("Remaining audio synthesis failed")
             gemma_processor._update_history(transcription, initial_text + remaining_text)
+            end_time = time.time()
+            logger.info(f"Total processing time for segment: {end_time - segment_start_time:.3f}s")
         except asyncio.CancelledError:
             logger.info("Processing cancelled")
         except Exception as e:
@@ -311,6 +351,7 @@ async def handle_client(websocket):
 
     async def receive_audio_and_images():
         async for message in websocket:
+            start_time = time.time()
             try:
                 data = json.loads(message)
                 if "realtime_input" in data:
@@ -325,8 +366,11 @@ async def handle_client(websocket):
                     image_data = base64.b64decode(data["image"])
                     if image_data:
                         await gemma_processor.set_image(image_data)
+                end_time = time.time()
+                logger.info(f"Message processed in {end_time - start_time:.3f}s")
             except Exception as e:
-                logger.error(f"Error receiving data: {e}")
+                end_time = time.time()
+                logger.error(f"Error receiving data after {end_time - start_time:.3f}s: {e}")
 
     async def send_keepalive():
         while True:
