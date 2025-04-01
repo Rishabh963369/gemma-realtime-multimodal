@@ -3,7 +3,7 @@ import json
 import websockets
 import base64
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, Gemma3ForConditionalGeneration
 import numpy as np
 import logging
 import sys
@@ -11,8 +11,6 @@ import io
 from PIL import Image
 import time
 from kokoro import KPipeline
-import google.generativeai as genai
-import os
 
 # Configure logging
 logging.basicConfig(
@@ -21,10 +19,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
-
-# Configure Gemini API
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyC0jAjJsgxGUBOvEw8h_L5HlzRVkaS9T-0")  # Replace with your key or use env var
-genai.configure(api_key=GEMINI_API_KEY)
 
 class AudioSegmentDetector:
     def __init__(self, sample_rate=16000, energy_threshold=0.015, silence_duration=0.5, min_speech_duration=0.5, max_speech_duration=10):
@@ -153,7 +147,7 @@ class WhisperTranscriber:
             logger.error(f"Transcription error: {e}")
             return ""
 
-class GeminiMultimodalProcessor:
+class GemmaMultimodalProcessor:
     _instance = None
 
     @classmethod
@@ -163,13 +157,16 @@ class GeminiMultimodalProcessor:
         return cls._instance
 
     def __init__(self):
-        self.model = genai.GenerativeModel('gemini-1.5-pro')  # Adjust model name as per Gemini API docs
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        model_id = "google/gemma-3-4b-it"
+        self.model = Gemma3ForConditionalGeneration.from_pretrained(model_id, device_map="auto", load_in_8bit=True, torch_dtype=torch.bfloat16)
+        self.processor = AutoProcessor.from_pretrained(model_id)
         self.last_image = None
         self.last_image_timestamp = 0
         self.lock = asyncio.Lock()
         self.message_history = []
         self.generation_count = 0
-        logger.info("Gemini API initialized")
+        logger.info("Gemma model loaded")
 
     async def set_image(self, image_data):
         async with self.lock:
@@ -188,39 +185,39 @@ class GeminiMultimodalProcessor:
                 logger.error(f"Error processing image: {str(e)}")
                 return False
 
-    def _build_prompt(self, text):
-        prompt = "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation.\n"
-        for msg in self.message_history:
-            if msg["role"] == "user":
-                prompt += f"User: {msg['content'][0]['text']}\n"
-            elif msg["role"] == "assistant":
-                prompt += f"Assistant: {msg['content'][0]['text']}\n"
-        prompt += f"User: {text}\nAssistant: "
-        return prompt
+    def _build_messages(self, text):
+        messages = [{"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation."}]}]
+        messages.extend(self.message_history)
+        if self.last_image:
+            messages.append({"role": "user", "content": [{"type": "image", "image": self.last_image}, {"type": "text", "text": text}]})
+        else:
+            messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
+        return messages
 
     def _update_history(self, user_text, assistant_response):
-        self.message_history = [{"role": "user", "content": [{"text": user_text}]}, {"role": "assistant", "content": [{"text": assistant_response}]}]
+        self.message_history = [{"role": "user", "content": [{"type": "text", "text": user_text}]}, {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}]
 
-    async def generate(self, text):
+    async def generate_streaming(self, text):
         async with self.lock:
             try:
-                prompt = self._build_prompt(text)
-                content = [prompt]
-                if self.last_image:
-                    # Convert PIL Image to bytes for API
-                    img_byte_arr = io.BytesIO()
-                    self.last_image.save(img_byte_arr, format='JPEG')
-                    img_bytes = img_byte_arr.getvalue()
-                    content.append({"mime_type": "image/jpeg", "data": img_bytes})
-
-                response = await asyncio.to_thread(self.model.generate_content, content)
-                generated_text = response.text.strip()
+                messages = self._build_messages(text)
+                inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
+                from transformers import TextIteratorStreamer
+                streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
+                generation_kwargs = dict(**inputs, max_new_tokens=64, do_sample=True, temperature=0.7, use_cache=True, streamer=streamer)
+                import threading
+                threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
+                initial_text = ""
+                for chunk in streamer:
+                    initial_text += chunk
+                    if len(initial_text) > 20 or "." in chunk or "," in chunk:
+                        break
                 self.generation_count += 1
-                logger.info(f"Gemini generated: '{generated_text}'")
-                return generated_text
+                logger.info(f"Generated initial text: '{initial_text}'")
+                return streamer, initial_text
             except Exception as e:
-                logger.error(f"Gemini API error: {e}")
-                return "Sorry, I couldn’t process that due to an error."
+                logger.error(f"Gemma streaming error: {e}")
+                return None, f"Sorry, I couldn’t process that due to an error."
 
 class KokoroTTSProcessor:
     _instance = None
@@ -258,7 +255,7 @@ class KokoroTTSProcessor:
 async def handle_client(websocket):
     detector = AudioSegmentDetector()
     transcriber = WhisperTranscriber.get_instance()
-    gemini_processor = GeminiMultimodalProcessor.get_instance()
+    gemma_processor = GemmaMultimodalProcessor.get_instance()
     tts_processor = KokoroTTSProcessor.get_instance()
 
     async def process_speech_segment(speech_segment):
@@ -268,21 +265,30 @@ async def handle_client(websocket):
                 logger.info(f"Skipping empty transcription: '{transcription}'")
                 return
             await detector.set_tts_playing(True)
-            response_text = await gemini_processor.generate(transcription)
-            if not response_text:
+            streamer, initial_text = await gemma_processor.generate_streaming(transcription)
+            if not streamer or not initial_text:
                 logger.error("No response generated")
-                audio = await tts_processor.synthesize_speech("Sorry, I couldn’t generate a response.")
-                if audio is not None:
-                    audio_bytes = (audio * 32767).astype(np.int16).tobytes()
+                initial_audio = await tts_processor.synthesize_speech("Sorry, I couldn’t generate a response.")
+                if initial_audio is not None:
+                    audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
                     await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
                 return
-            audio = await tts_processor.synthesize_speech(response_text)
-            if audio is not None:
-                audio_bytes = (audio * 32767).astype(np.int16).tobytes()
+            initial_audio = await tts_processor.synthesize_speech(initial_text)
+            if initial_audio is not None:
+                audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
                 await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
             else:
-                logger.error("Audio synthesis failed")
-            gemini_processor._update_history(transcription, response_text)
+                logger.error("Initial audio synthesis failed")
+            remaining_text = ""
+            for chunk in streamer:
+                remaining_text += chunk
+            remaining_audio = await tts_processor.synthesize_speech(remaining_text)
+            if remaining_audio is not None:
+                audio_bytes = (remaining_audio * 32767).astype(np.int16).tobytes()
+                await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
+            else:
+                logger.error("Remaining audio synthesis failed")
+            gemma_processor._update_history(transcription, initial_text + remaining_text)
         except asyncio.CancelledError:
             logger.info("Processing cancelled")
         except Exception as e:
@@ -314,11 +320,11 @@ async def handle_client(websocket):
                         elif chunk["mime_type"] == "image/jpeg" and not detector.tts_playing:
                             image_data = base64.b64decode(chunk["data"])
                             if image_data:
-                                await gemini_processor.set_image(image_data)
+                                await gemma_processor.set_image(image_data)
                 if "image" in data and not detector.tts_playing:
                     image_data = base64.b64decode(data["image"])
                     if image_data:
-                        await gemini_processor.set_image(image_data)
+                        await gemma_processor.set_image(image_data)
             except Exception as e:
                 logger.error(f"Error receiving data: {e}")
 
@@ -338,7 +344,7 @@ async def handle_client(websocket):
 
 async def main():
     WhisperTranscriber.get_instance()
-    GeminiMultimodalProcessor.get_instance()
+    GemmaMultimodalProcessor.get_instance()
     KokoroTTSProcessor.get_instance()
     logger.info("Starting WebSocket server on 0.0.0.0:9073")
     async with websockets.serve(handle_client, "0.0.0.0", 9073, ping_interval=20, ping_timeout=60, close_timeout=10):
