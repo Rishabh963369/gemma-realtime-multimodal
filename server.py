@@ -3,15 +3,14 @@ import json
 import websockets
 import base64
 import torch
-from faster_whisper import WhisperModel
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, Gemma3ForConditionalGeneration
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, TextIteratorStreamer
 import numpy as np
 import logging
 import sys
 import io
 from PIL import Image
 import time
-from kokoro import KPipeline
+from concurrent.futures import ThreadPoolExecutor
 
 # Configure logging
 logging.basicConfig(
@@ -20,6 +19,9 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
+
+# Thread pool for offloading heavy tasks
+executor = ThreadPoolExecutor(max_workers=2)
 
 class AudioSegmentDetector:
     def __init__(self, sample_rate=16000, energy_threshold=0.015, silence_duration=0.5, min_speech_duration=0.5, max_speech_duration=10):
@@ -124,32 +126,23 @@ class WhisperTranscriber:
         return cls._instance
 
     def __init__(self):
-        # Define compute type based on device availability
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if self.device == "cuda" else "int8"  # Adjust for CPU/GPU
-        # Load the faster-whisper model
-        self.model = WhisperModel("large-v3-turbo", device=self.device, compute_type=compute_type)
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        self.torch_dtype = torch.float16 if self.device != "cpu" else torch.float32
+        model_id = "openai/whisper-large-v3-turbo"
+        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True).to(self.device)
+        self.processor = AutoProcessor.from_pretrained(model_id)
+        self.pipe = pipeline("automatic-speech-recognition", model=self.model, tokenizer=self.processor.tokenizer, feature_extractor=self.processor.feature_extractor, torch_dtype=self.torch_dtype, device=self.device)
         self.transcription_count = 0
-        logger.info("Faster-Whisper model loaded")
+        logger.info("Whisper model loaded")
 
     async def transcribe(self, audio_bytes, sample_rate=16000):
         try:
-            # Convert audio bytes to numpy array
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             if len(audio_array) < 500:
                 logger.info("Audio too short for transcription")
                 return ""
-
-            # Perform transcription with faster-whisper
-            segments, _ = self.model.transcribe(
-                audio_array,
-                language="en",  # Assuming English as per your original code
-                task="transcribe",
-                beam_size=5,    # Adjust for accuracy vs. speed
-                vad_filter=True # Optional: Voice Activity Detection to filter silence
-            )
-            # Combine text from all segments
-            text = " ".join(segment.text.strip() for segment in segments)
+            result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"raw": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"}))
+            text = result.get("text", "").strip()
             self.transcription_count += 1
             logger.info(f"Transcription: '{text}'")
             return text
@@ -168,32 +161,32 @@ class GemmaMultimodalProcessor:
 
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        model_id = "google/gemma-3-4b-it"
-        self.model = Gemma3ForConditionalGeneration.from_pretrained(model_id, device_map="auto", load_in_8bit=True, torch_dtype=torch.bfloat16)
+        model_id = "google/gemma-3-4b-it"  # Consider "gemma-2b" for faster inference
+        self.model = Gemma3ForConditionalGeneration.from_pretrained(
+            model_id, device_map="auto", load_in_8bit=True, torch_dtype=torch.bfloat16
+        )
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.last_image = None
         self.last_image_timestamp = 0
-        self.lock = asyncio.Lock()
         self.message_history = []
         self.generation_count = 0
         logger.info("Gemma model loaded")
 
     async def set_image(self, image_data):
-        async with self.lock:
-            try:
-                if not image_data or len(image_data) < 100:
-                    logger.warning("Invalid or empty image data received")
-                    return False
-                image = Image.open(io.BytesIO(image_data))
-                resized_image = image.resize((int(image.size[0] * 0.75), int(image.size[1] * 0.75)), Image.Resampling.LANCZOS)
-                self.message_history = []
-                self.last_image = resized_image
-                self.last_image_timestamp = time.time()
-                logger.info("Image set successfully")
-                return True
-            except Exception as e:
-                logger.error(f"Error processing image: {str(e)}")
+        try:
+            if not image_data or len(image_data) < 100:
+                logger.warning("Invalid or empty image data received")
                 return False
+            image = Image.open(io.BytesIO(image_data))
+            resized_image = image.resize((int(image.size[0] * 0.75), int(image.size[1] * 0.75)), Image.Resampling.LANCZOS)
+            self.message_history = []
+            self.last_image = resized_image
+            self.last_image_timestamp = time.time()
+            logger.info("Image set successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error processing image: {str(e)}")
+            return False
 
     def _build_messages(self, text):
         messages = [{"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation."}]}]
@@ -208,26 +201,32 @@ class GemmaMultimodalProcessor:
         self.message_history = [{"role": "user", "content": [{"type": "text", "text": user_text}]}, {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}]
 
     async def generate_streaming(self, text):
-        async with self.lock:
-            try:
-                messages = self._build_messages(text)
-                inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
-                from transformers import TextIteratorStreamer
-                streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
-                generation_kwargs = dict(**inputs, max_new_tokens=64, do_sample=True, temperature=0.7, use_cache=True, streamer=streamer)
-                import threading
-                threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
-                initial_text = ""
-                for chunk in streamer:
-                    initial_text += chunk
-                    if len(initial_text) > 20 or "." in chunk or "," in chunk:
-                        break
-                self.generation_count += 1
-                logger.info(f"Generated initial text: '{initial_text}'")
-                return streamer, initial_text
-            except Exception as e:
-                logger.error(f"Gemma streaming error: {e}")
-                return None, f"Sorry, I couldn’t process that due to an error."
+        try:
+            messages = self._build_messages(text)
+            inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
+            streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
+            generation_kwargs = dict(
+                **inputs,
+                max_new_tokens=32,  # Reduced for faster response
+                do_sample=True,
+                temperature=0.9,  # Adjusted for quicker sampling
+                top_k=50,  # Add top-k sampling for efficiency
+                use_cache=True,
+                streamer=streamer
+            )
+            # Offload generation to thread pool
+            await asyncio.get_event_loop().run_in_executor(executor, lambda: self.model.generate(**generation_kwargs))
+            initial_text = ""
+            for chunk in streamer:
+                initial_text += chunk
+                if len(initial_text) > 10 or "." in chunk or "," in chunk:  # Reduced threshold
+                    break
+            self.generation_count += 1
+            logger.info(f"Generated initial text: '{initial_text}'")
+            return streamer, initial_text
+        except Exception as e:
+            logger.error(f"Gemma streaming error: {e}")
+            return None, "Sorry, I couldn’t process that."
 
 class KokoroTTSProcessor:
     _instance = None
@@ -239,6 +238,7 @@ class KokoroTTSProcessor:
         return cls._instance
 
     def __init__(self):
+        from kokoro import KPipeline  # Assuming this is the correct import
         self.pipeline = KPipeline(lang_code='a')
         self.default_voice = 'af_sarah'
         self.synthesis_count = 0
@@ -248,15 +248,15 @@ class KokoroTTSProcessor:
         if not text or not self.pipeline:
             return None
         try:
-            audio_segments = []
-            generator = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipeline(text, voice=self.default_voice, speed=1, split_pattern=r'[.!?。！？]+'))
-            for _, _, audio in generator:
-                audio_segments.append(audio)
-            if audio_segments:
-                combined_audio = np.concatenate(audio_segments)
+            # Offload synthesis to thread pool and assume single audio output
+            audio = await asyncio.get_event_loop().run_in_executor(
+                executor,
+                lambda: self.pipeline(text, voice=self.default_voice, speed=1.1)  # Slightly faster speed
+            )
+            if audio is not None:
                 self.synthesis_count += 1
-                logger.info(f"TTS synthesized: {len(combined_audio)} samples")
-                return combined_audio
+                logger.info(f"TTS synthesized: {len(audio)} samples")
+                return audio
             return None
         except Exception as e:
             logger.error(f"TTS error: {e}")
@@ -278,26 +278,25 @@ async def handle_client(websocket):
             streamer, initial_text = await gemma_processor.generate_streaming(transcription)
             if not streamer or not initial_text:
                 logger.error("No response generated")
-                initial_audio = await tts_processor.synthesize_speech("Sorry, I couldn’t generate a response.")
+                initial_audio = await tts_processor.synthesize_speech("Sorry, I couldn’t respond.")
                 if initial_audio is not None:
                     audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
                     await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
                 return
+            # Process initial audio
             initial_audio = await tts_processor.synthesize_speech(initial_text)
             if initial_audio is not None:
                 audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
                 await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
-            else:
-                logger.error("Initial audio synthesis failed")
+            # Stream remaining text
             remaining_text = ""
             for chunk in streamer:
                 remaining_text += chunk
-            remaining_audio = await tts_processor.synthesize_speech(remaining_text)
-            if remaining_audio is not None:
-                audio_bytes = (remaining_audio * 32767).astype(np.int16).tobytes()
-                await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
-            else:
-                logger.error("Remaining audio synthesis failed")
+            if remaining_text:
+                remaining_audio = await tts_processor.synthesize_speech(remaining_text)
+                if remaining_audio is not None:
+                    audio_bytes = (remaining_audio * 32767).astype(np.int16).tobytes()
+                    await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
             gemma_processor._update_history(transcription, initial_text + remaining_text)
         except asyncio.CancelledError:
             logger.info("Processing cancelled")
