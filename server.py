@@ -3,14 +3,14 @@ import json
 import websockets
 import base64
 import torch
-from transformers import AutoModelForVision2Seq, AutoProcessor, pipeline, TextIteratorStreamer
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, AutoModelForVision2Seq, TextIteratorStreamer
 import numpy as np
 import logging
 import sys
 import io
 from PIL import Image
 import time
-from kokoro import KPipeline  # Assuming custom TTS library
+from kokoro import KPipeline  # Assuming this is your custom TTS library
 
 # Configure logging
 logging.basicConfig(
@@ -169,12 +169,12 @@ class GemmaMultimodalProcessor:
 
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        model_id = "llava-hf/llava-13b-hf"  # Multimodal model for image + text
+        model_id = "llava-hf/llava-13b-hf"
         self.model = AutoModelForVision2Seq.from_pretrained(
             model_id,
             device_map="auto",
             torch_dtype=torch.float16,
-            load_in_8bit=True  # 8-bit for speed
+            load_in_8bit=True
         )
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.last_image = None
@@ -191,7 +191,7 @@ class GemmaMultimodalProcessor:
                     logger.warning("Invalid or empty image data received")
                     return False
                 image = Image.open(io.BytesIO(image_data)).convert("RGB")
-                resized_image = image.resize((336, 336), Image.Resampling.LANCZOS)  # LLaVA prefers 336x336
+                resized_image = image.resize((336, 336), Image.Resampling.LANCZOS)
                 self.message_history = []
                 self.last_image = resized_image
                 self.last_image_timestamp = time.time()
@@ -220,7 +220,7 @@ class GemmaMultimodalProcessor:
                 streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
                 generation_kwargs = dict(
                     **inputs,
-                    max_new_tokens=40,  # Reduced for speed
+                    max_new_tokens=40,
                     do_sample=True,
                     temperature=0.6,
                     use_cache=True,
@@ -231,7 +231,7 @@ class GemmaMultimodalProcessor:
                 initial_text = ""
                 for chunk in streamer:
                     initial_text += chunk
-                    if len(initial_text) > 10 or "." in chunk or "," in chunk:  # Earlier cutoff
+                    if len(initial_text) > 10 or "." in chunk or "," in chunk:
                         break
                 self.generation_count += 1
                 logger.info(f"Generated initial text: '{initial_text}'")
