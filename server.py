@@ -118,6 +118,7 @@ class AudioSegmentDetector:
         except asyncio.TimeoutError:
             return None
 
+
 class WhisperTranscriber:
     """Handles speech transcription using Distil-Whisper for faster inference"""
     _instance = None
@@ -169,10 +170,8 @@ class WhisperTranscriber:
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.pipe(
-                    {"array": audio_array, "sampling_rate": sample_rate},
+                    {"input_features": audio_array, "sampling_rate": sample_rate},  # Updated key
                     generate_kwargs={
-                        "task": "transcribe",
-                        "language": "english",
                         "temperature": 0.0,
                         "max_new_tokens": 128
                     },
