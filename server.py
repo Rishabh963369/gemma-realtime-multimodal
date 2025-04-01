@@ -11,6 +11,7 @@ from PIL import Image
 import time
 from kokoro import KPipeline
 from faster_whisper import WhisperModel
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, AutoModelForCausalLM
 
 # Configure logging
 logging.basicConfig(
@@ -137,7 +138,7 @@ class WhisperTranscriber:
                 logger.info("Audio too short for transcription")
                 return ""
             segments, info = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: self.model.transcribe(audio_array, sample_rate=sample_rate, language="en") # remove language="en" for auto detection
+                None, lambda: self.model.transcribe(audio_array, sample_rate=sample_rate) # remove language="en" for auto detection
             )
 
             text = ""
@@ -164,7 +165,7 @@ class GemmaMultimodalProcessor:
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         model_id = "google/gemma-3-4b-it"
-        self.model = Gemma3ForConditionalGeneration.from_pretrained(model_id, device_map="auto", load_in_8bit=True, torch_dtype=torch.bfloat16)
+        self.model = AutoModelForCausalLM.from_pretrained(model_id, device_map="auto", load_in_8bit=True, torch_dtype=torch.bfloat16)
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.last_image = None
         self.last_image_timestamp = 0
