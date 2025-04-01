@@ -3,14 +3,14 @@ import json
 import websockets
 import base64
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
+from transformers import AutoModelForVision2Seq, AutoProcessor, pipeline, TextIteratorStreamer
 import numpy as np
 import logging
 import sys
 import io
 from PIL import Image
 import time
-from kokoro import KPipeline  # Assuming this is your custom TTS library
+from kokoro import KPipeline  # Assuming custom TTS library
 
 # Configure logging
 logging.basicConfig(
@@ -169,20 +169,20 @@ class GemmaMultimodalProcessor:
 
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        model_id = "google/gemma-7b-it"  # Using Gemma-7B-IT for better responses
-        self.model = AutoModelForCausalLM.from_pretrained(
+        model_id = "llava-hf/llava-13b-hf"  # Multimodal model for image + text
+        self.model = AutoModelForVision2Seq.from_pretrained(
             model_id,
             device_map="auto",
-            torch_dtype=torch.bfloat16,
-            load_in_8bit=True  # 8-bit quantization for speed
+            torch_dtype=torch.float16,
+            load_in_8bit=True  # 8-bit for speed
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        self.processor = AutoProcessor.from_pretrained(model_id)
         self.last_image = None
         self.last_image_timestamp = 0
         self.lock = asyncio.Lock()
         self.message_history = []
         self.generation_count = 0
-        logger.info("Gemma-7B-IT model loaded with 8-bit quantization")
+        logger.info("LLaVA-13B model loaded with 8-bit quantization")
 
     async def set_image(self, image_data):
         async with self.lock:
@@ -190,8 +190,8 @@ class GemmaMultimodalProcessor:
                 if not image_data or len(image_data) < 100:
                     logger.warning("Invalid or empty image data received")
                     return False
-                image = Image.open(io.BytesIO(image_data))
-                resized_image = image.resize((int(image.size[0] * 0.5), int(image.size[1] * 0.5)), Image.Resampling.LANCZOS)
+                image = Image.open(io.BytesIO(image_data)).convert("RGB")
+                resized_image = image.resize((336, 336), Image.Resampling.LANCZOS)  # LLaVA prefers 336x336
                 self.message_history = []
                 self.last_image = resized_image
                 self.last_image_timestamp = time.time()
@@ -201,15 +201,14 @@ class GemmaMultimodalProcessor:
                 logger.error(f"Error processing image: {str(e)}")
                 return False
 
-    def _build_prompt(self, text):
-        prompt = "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation.\n"
+    def _build_inputs(self, text):
         if self.last_image:
-            prompt += f"[Image provided]\nUser: {text}"
+            prompt = f"You are a helpful assistant. Describe the image or answer based on it.\nUser: {text}"
+            inputs = self.processor(text=prompt, images=self.last_image, return_tensors="pt").to(self.model.device)
         else:
-            prompt += f"User: {text}"
-        if self.message_history:
-            prompt += "\nConversation history:\n" + "\n".join([f"{msg['role']}: {msg['content']}" for msg in self.message_history])
-        return prompt
+            prompt = f"You are a helpful assistant providing concise spoken responses.\nUser: {text}"
+            inputs = self.processor(text=prompt, return_tensors="pt").to(self.model.device)
+        return inputs
 
     def _update_history(self, user_text, assistant_response):
         self.message_history = [{"role": "user", "content": user_text}, {"role": "assistant", "content": assistant_response}]
@@ -217,13 +216,11 @@ class GemmaMultimodalProcessor:
     async def generate_streaming(self, text):
         async with self.lock:
             try:
-                prompt = self._build_prompt(text)
-                inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-                from transformers import TextIteratorStreamer
-                streamer = TextIteratorStreamer(self.tokenizer, skip_special_tokens=True)
+                inputs = self._build_inputs(text)
+                streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
                 generation_kwargs = dict(
                     **inputs,
-                    max_new_tokens=50,
+                    max_new_tokens=40,  # Reduced for speed
                     do_sample=True,
                     temperature=0.6,
                     use_cache=True,
@@ -234,14 +231,14 @@ class GemmaMultimodalProcessor:
                 initial_text = ""
                 for chunk in streamer:
                     initial_text += chunk
-                    if len(initial_text) > 15 or "." in chunk or "," in chunk:
+                    if len(initial_text) > 10 or "." in chunk or "," in chunk:  # Earlier cutoff
                         break
                 self.generation_count += 1
                 logger.info(f"Generated initial text: '{initial_text}'")
                 return streamer, initial_text
             except Exception as e:
-                logger.error(f"Gemma streaming error: {e}")
-                return None, f"Sorry, I couldn’t process that due to an error."
+                logger.error(f"LLaVA streaming error: {e}")
+                return None, "Sorry, I couldn’t process that due to an error."
 
 class KokoroTTSProcessor:
     _instance = None
