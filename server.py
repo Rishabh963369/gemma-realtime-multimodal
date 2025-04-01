@@ -3,7 +3,7 @@ import json
 import websockets
 import base64
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, TextIteratorStreamer
+from transformers import AutoModelForCausalLM, AutoProcessor, pipeline, TextIteratorStreamer  # Updated import
 import numpy as np
 import logging
 import sys
@@ -161,8 +161,8 @@ class GemmaMultimodalProcessor:
 
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        model_id = "google/gemma-3-4b-it"  # Consider "gemma-2b" for faster inference
-        self.model = Gemma3ForConditionalGeneration.from_pretrained(
+        model_id = "google/gemma-7b-it"  # Updated to a valid model ID; adjust if needed
+        self.model = AutoModelForCausalLM.from_pretrained(  # Changed to AutoModelForCausalLM
             model_id, device_map="auto", load_in_8bit=True, torch_dtype=torch.bfloat16
         )
         self.processor = AutoProcessor.from_pretrained(model_id)
@@ -207,19 +207,18 @@ class GemmaMultimodalProcessor:
             streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
             generation_kwargs = dict(
                 **inputs,
-                max_new_tokens=32,  # Reduced for faster response
+                max_new_tokens=32,
                 do_sample=True,
-                temperature=0.9,  # Adjusted for quicker sampling
-                top_k=50,  # Add top-k sampling for efficiency
+                temperature=0.9,
+                top_k=50,
                 use_cache=True,
                 streamer=streamer
             )
-            # Offload generation to thread pool
             await asyncio.get_event_loop().run_in_executor(executor, lambda: self.model.generate(**generation_kwargs))
             initial_text = ""
             for chunk in streamer:
                 initial_text += chunk
-                if len(initial_text) > 10 or "." in chunk or "," in chunk:  # Reduced threshold
+                if len(initial_text) > 10 or "." in chunk or "," in chunk:
                     break
             self.generation_count += 1
             logger.info(f"Generated initial text: '{initial_text}'")
@@ -248,10 +247,9 @@ class KokoroTTSProcessor:
         if not text or not self.pipeline:
             return None
         try:
-            # Offload synthesis to thread pool and assume single audio output
             audio = await asyncio.get_event_loop().run_in_executor(
                 executor,
-                lambda: self.pipeline(text, voice=self.default_voice, speed=1.1)  # Slightly faster speed
+                lambda: self.pipeline(text, voice=self.default_voice, speed=1.1)
             )
             if audio is not None:
                 self.synthesis_count += 1
@@ -283,12 +281,10 @@ async def handle_client(websocket):
                     audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
                     await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
                 return
-            # Process initial audio
             initial_audio = await tts_processor.synthesize_speech(initial_text)
             if initial_audio is not None:
                 audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
                 await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
-            # Stream remaining text
             remaining_text = ""
             for chunk in streamer:
                 remaining_text += chunk
