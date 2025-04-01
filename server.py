@@ -169,7 +169,7 @@ class GemmaMultimodalProcessor:
 
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        model_id = "llava-hf/llava-13b-hf"
+        model_id = "llava-hf/llava-1.5-13b-hf"  # Updated to a valid model ID
         self.model = AutoModelForVision2Seq.from_pretrained(
             model_id,
             device_map="auto",
@@ -182,7 +182,7 @@ class GemmaMultimodalProcessor:
         self.lock = asyncio.Lock()
         self.message_history = []
         self.generation_count = 0
-        logger.info("LLaVA-13B model loaded with 8-bit quantization")
+        logger.info("LLaVA-1.5-13B model loaded with 8-bit quantization")
 
     async def set_image(self, image_data):
         async with self.lock:
