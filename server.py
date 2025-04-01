@@ -3,14 +3,14 @@ import json
 import websockets
 import base64
 import torch
+from faster_whisper import WhisperModel
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, Gemma3ForConditionalGeneration
 import numpy as np
 import logging
 import sys
 import io
 from PIL import Image
 import time
-from faster_whisper import WhisperModel  # New import for Fast Whisper
-from transformers import AutoProcessor, Gemma3ForConditionalGeneration
 from kokoro import KPipeline
 
 # Configure logging
@@ -114,7 +114,7 @@ class AudioSegmentDetector:
         except asyncio.TimeoutError:
             return None
 
-class FastWhisperTranscriber:
+class WhisperTranscriber:
     _instance = None
 
     @classmethod
@@ -124,22 +124,31 @@ class FastWhisperTranscriber:
         return cls._instance
 
     def __init__(self):
+        # Define compute type based on device availability
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        # Load the faster-whisper model (e.g., "large-v3-turbo")
-        self.model = WhisperModel("large-v3", device=self.device, compute_type="float16" if self.device == "cuda" else "float32")
+        compute_type = "float16" if self.device == "cuda" else "int8"  # Adjust for CPU/GPU
+        # Load the faster-whisper model
+        self.model = WhisperModel("large-v3-turbo", device=self.device, compute_type=compute_type)
         self.transcription_count = 0
-        logger.info("Fast Whisper model loaded")
+        logger.info("Faster-Whisper model loaded")
 
     async def transcribe(self, audio_bytes, sample_rate=16000):
         try:
+            # Convert audio bytes to numpy array
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             if len(audio_array) < 500:
                 logger.info("Audio too short for transcription")
                 return ""
-            # Run transcription using faster-whisper
-            segments, _ = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: self.model.transcribe(audio_array, language="en", beam_size=5)
+
+            # Perform transcription with faster-whisper
+            segments, _ = self.model.transcribe(
+                audio_array,
+                language="en",  # Assuming English as per your original code
+                task="transcribe",
+                beam_size=5,    # Adjust for accuracy vs. speed
+                vad_filter=True # Optional: Voice Activity Detection to filter silence
             )
+            # Combine text from all segments
             text = " ".join(segment.text.strip() for segment in segments)
             self.transcription_count += 1
             logger.info(f"Transcription: '{text}'")
@@ -255,7 +264,7 @@ class KokoroTTSProcessor:
 
 async def handle_client(websocket):
     detector = AudioSegmentDetector()
-    transcriber = FastWhisperTranscriber.get_instance()  # Updated to FastWhisperTranscriber
+    transcriber = WhisperTranscriber.get_instance()
     gemma_processor = GemmaMultimodalProcessor.get_instance()
     tts_processor = KokoroTTSProcessor.get_instance()
 
@@ -344,7 +353,7 @@ async def handle_client(websocket):
         await detector.cancel_current_tasks()
 
 async def main():
-    FastWhisperTranscriber.get_instance()  # Updated to FastWhisperTranscriber
+    WhisperTranscriber.get_instance()
     GemmaMultimodalProcessor.get_instance()
     KokoroTTSProcessor.get_instance()
     logger.info("Starting WebSocket server on 0.0.0.0:9073")
