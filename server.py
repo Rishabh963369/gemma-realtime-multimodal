@@ -3,7 +3,7 @@ import json
 import websockets
 import base64
 import torch
-from transformers import AutoModelForCausalLM, AutoProcessor, pipeline, TextIteratorStreamer  # Updated import
+from transformers import AutoModelForCausalLM, AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, TextIteratorStreamer
 import numpy as np
 import logging
 import sys
@@ -129,9 +129,21 @@ class WhisperTranscriber:
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.torch_dtype = torch.float16 if self.device != "cpu" else torch.float32
         model_id = "openai/whisper-large-v3-turbo"
-        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True).to(self.device)
+        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_id, 
+            torch_dtype=self.torch_dtype, 
+            low_cpu_mem_usage=True, 
+            use_safetensors=True
+        ).to(self.device)
         self.processor = AutoProcessor.from_pretrained(model_id)
-        self.pipe = pipeline("automatic-speech-recognition", model=self.model, tokenizer=self.processor.tokenizer, feature_extractor=self.processor.feature_extractor, torch_dtype=self.torch_dtype, device=self.device)
+        self.pipe = pipeline(
+            "automatic-speech-recognition", 
+            model=self.model, 
+            tokenizer=self.processor.tokenizer, 
+            feature_extractor=self.processor.feature_extractor, 
+            torch_dtype=self.torch_dtype, 
+            device=self.device
+        )
         self.transcription_count = 0
         logger.info("Whisper model loaded")
 
@@ -141,7 +153,13 @@ class WhisperTranscriber:
             if len(audio_array) < 500:
                 logger.info("Audio too short for transcription")
                 return ""
-            result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"raw": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"}))
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, 
+                lambda: self.pipe(
+                    {"raw": audio_array, "sampling_rate": sample_rate}, 
+                    generate_kwargs={"task": "transcribe", "language": "english"}
+                )
+            )
             text = result.get("text", "").strip()
             self.transcription_count += 1
             logger.info(f"Transcription: '{text}'")
@@ -161,9 +179,12 @@ class GemmaMultimodalProcessor:
 
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        model_id = "google/gemma-7b-it"  # Updated to a valid model ID; adjust if needed
-        self.model = AutoModelForCausalLM.from_pretrained(  # Changed to AutoModelForCausalLM
-            model_id, device_map="auto", load_in_8bit=True, torch_dtype=torch.bfloat16
+        model_id = "google/gemma-7b-it"
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_id, 
+            device_map="auto", 
+            load_in_8bit=True, 
+            torch_dtype=torch.bfloat16
         )
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.last_image = None
@@ -189,16 +210,32 @@ class GemmaMultimodalProcessor:
             return False
 
     def _build_messages(self, text):
-        messages = [{"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation."}]}]
+        messages = [
+            {
+                "role": "system", 
+                "content": [
+                    {"type": "text", "text": "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation."}
+                ]
+            }
+        ]
         messages.extend(self.message_history)
         if self.last_image:
-            messages.append({"role": "user", "content": [{"type": "image", "image": self.last_image}, {"type": "text", "text": text}]})
+            messages.append({
+                "role": "user", 
+                "content": [
+                    {"type": "image", "image": self.last_image}, 
+                    {"type": "text", "text": text}
+                ]
+            })
         else:
             messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
         return messages
 
     def _update_history(self, user_text, assistant_response):
-        self.message_history = [{"role": "user", "content": [{"type": "text", "text": user_text}]}, {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}]
+        self.message_history = [
+            {"role": "user", "content": [{"type": "text", "text": user_text}]}, 
+            {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}
+        ]
 
     async def generate_streaming(self, text):
         try:
