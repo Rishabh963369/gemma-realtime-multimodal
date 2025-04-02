@@ -142,7 +142,7 @@ class WhisperTranscriber:
             if len(audio_array) < 500:
                 logger.info("Audio too short for transcription")
                 return ""
-            result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"raw": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"}))
+            result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"input_features": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"}))
             text = result.get("text", "").strip()
             self.transcription_count += 1
             logger.info(f"Transcription: '{text}'")
@@ -162,7 +162,7 @@ class GemmaMultimodalProcessor:
 
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        model_id = "google/gemma-2b-it"  # Using smaller model for speed
+        model_id = "google/gemma-2b-it"
         self.model = AutoModelForCausalLM.from_pretrained(model_id, device_map="auto", torch_dtype=torch.bfloat16)
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.last_image = None
@@ -190,13 +190,14 @@ class GemmaMultimodalProcessor:
                 return False
 
     def _build_messages(self, text):
-        messages = [{"role": "system", "content": "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation."}]
-        messages.extend(self.message_history)
+        # Convert to a single string format expected by the processor
+        system_prompt = "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation."
+        history = "\n".join([f"User: {msg['content']}\nAssistant: {self.message_history[i+1]['content']}" for i in range(0, len(self.message_history), 2)])
         if self.last_image:
-            messages.append({"role": "user", "content": f"[Image provided] {text}"})
+            user_input = f"[Image provided]\n{text}"
         else:
-            messages.append({"role": "user", "content": text})
-        return messages
+            user_input = text
+        return f"{system_prompt}\n{history}\nUser: {user_input}\nAssistant:"
 
     def _update_history(self, user_text, assistant_response):
         self.message_history = [{"role": "user", "content": user_text}, {"role": "assistant", "content": assistant_response}]
@@ -263,7 +264,7 @@ class KokoroTTSProcessor:
             
             audio_segments = []
             for task in asyncio.as_completed(audio_tasks):
-                _, _, audio = await task
+                audio = await task  # Assuming pipeline returns audio directly
                 audio_segments.append(audio)
                 
             if audio_segments:
