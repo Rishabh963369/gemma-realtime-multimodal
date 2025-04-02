@@ -10,7 +10,7 @@ import sys
 import io
 from PIL import Image
 import time
-from kokoro import KPipeline  # Assuming this is a custom TTS library
+from kokoro import KPipeline  # Custom TTS library
 
 # Configure logging
 logging.basicConfig(
@@ -24,8 +24,8 @@ class AudioSegmentDetector:
     def __init__(self, sample_rate=16000, energy_threshold=0.015, silence_duration=0.3, min_speech_duration=0.2, max_speech_duration=8):
         self.sample_rate = sample_rate
         self.energy_threshold = energy_threshold
-        self.silence_samples = int(silence_duration * sample_rate)  # Reduced for faster detection
-        self.min_speech_samples = int(min_speech_duration * sample_rate)  # Reduced for quicker response
+        self.silence_samples = int(silence_duration * sample_rate)
+        self.min_speech_samples = int(min_speech_duration * sample_rate)
         self.max_speech_samples = int(max_speech_duration * sample_rate)
         self.audio_buffer = bytearray()
         self.is_speech_active = False
@@ -110,7 +110,7 @@ class AudioSegmentDetector:
 
     async def get_next_segment(self):
         try:
-            return await asyncio.wait_for(self.segment_queue.get(), timeout=0.02)  # Reduced timeout for faster polling
+            return await asyncio.wait_for(self.segment_queue.get(), timeout=0.02)
         except asyncio.TimeoutError:
             return None
 
@@ -129,7 +129,14 @@ class WhisperTranscriber:
         model_id = "openai/whisper-large-v3-turbo"
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True).to(self.device)
         self.processor = AutoProcessor.from_pretrained(model_id)
-        self.pipe = pipeline("automatic-speech-recognition", model=self.model, tokenizer=self.processor.tokenizer, feature_extractor=self.processor.feature_extractor, torch_dtype=self.torch_dtype, device=self.device)
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=self.model,
+            tokenizer=self.processor.tokenizer,
+            feature_extractor=self.processor.feature_extractor,
+            torch_dtype=self.torch_dtype,
+            device=self.device
+        )
         self.transcription_count = 0
         logger.info("Whisper model loaded")
 
@@ -139,7 +146,10 @@ class WhisperTranscriber:
             if len(audio_array) < 500:
                 logger.info("Audio too short for transcription")
                 return ""
-            result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"raw": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"}))
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.pipe({"raw": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"})
+            )
             text = result.get("text", "").strip()
             self.transcription_count += 1
             logger.info(f"Transcription: '{text}'")
@@ -247,13 +257,13 @@ class KokoroTTSProcessor:
                 if sentence.strip():
                     task = asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda s=sentence: self.pipeline(s, voice=self.default_voice, speed=1.2)  # Slightly faster speed
+                        lambda s=sentence: self.pipeline(s, voice=self.default_voice, speed=1.2)
                     )
                     tasks.append(task)
             
             # Process chunks concurrently
             results = await asyncio.gather(*tasks)
-            for _, _, audio in results:
+            for audio in results:
                 if audio is not None:
                     audio_segments.append(audio)
             
@@ -318,11 +328,11 @@ async def handle_client(websocket):
     async def detect_speech_segments():
         while True:
             speech_segment = await detector.get_next_segment()
-            if speech_segment and not detector.tts_playing:  # Only process if TTS isn't playing
+            if speech_segment and not detector.tts_playing:
                 await detector.cancel_current_tasks()
                 task = asyncio.create_task(process_speech_segment(speech_segment))
                 await detector.set_current_tasks(tts_task=task)
-            await asyncio.sleep(0.005)  # Reduced sleep for faster polling
+            await asyncio.sleep(0.005)
 
     async def receive_audio_and_images():
         async for message in websocket:
