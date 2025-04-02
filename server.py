@@ -210,7 +210,7 @@ class GemmaMultimodalProcessor:
                 initial_text = ""
                 for chunk in streamer:
                     initial_text += chunk
-                    if len(initial_text) > 15 or "." in chunk or "," in chunk:
+                    if len(initial_text) > 50 or "." in chunk or "," in chunk:
                         break
                 self.generation_count += 1
                 logger.info(f"Generated initial text: '{initial_text}'")
