@@ -204,14 +204,7 @@ class GemmaMultimodalProcessor:
                 inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
                 from transformers import TextIteratorStreamer
                 streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
-                generation_kwargs = dict(
-                    **inputs,
-                    max_new_tokens=32,  # Reduced for faster responses
-                    do_sample=True,
-                    temperature=0.5,  # Lower temperature for faster sampling
-                    use_cache=True,
-                    streamer=streamer
-                ) = dict(**inputs, max_new_tokens=64, do_sample=True, temperature=0.7, use_cache=True, streamer=streamer)
+                generation_kwargs = dict(**inputs, max_new_tokens=256, do_sample=True, use_cache=True, streamer=streamer)
                 import threading
                 threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
                 initial_text = ""
