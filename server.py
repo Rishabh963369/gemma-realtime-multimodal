@@ -234,50 +234,19 @@ class KokoroTTSProcessor:
         self.synthesis_count = 0
         logger.info("Kokoro TTS loaded")
 
-    async def synthesize_speech(self, text, websocket=None):
+    async def synthesize_speech(self, text):
         if not text or not self.pipeline:
             return None
         try:
-            # Split text into sentences for parallel processing
-            sentences = [s.strip() for s in text.split('.') if s.strip()]
-            if not sentences:
-                return None
-
             audio_segments = []
-            tasks = []
-
-            # Create tasks for each sentence
-            for sentence in sentences:
-                task = asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda s=sentence: self.pipeline(s, voice=self.default_voice, speed=1.2)  # Increased speed for optimization
-                )
-                tasks.append(task)
-
-            # Process sentences concurrently
-            results = await asyncio.gather(*tasks)
-            for result in results:
-                # Assuming KPipeline returns a tuple (_, _, audio), adjust if different
-                try:
-                    _, _, audio = result
-                    if audio is not None:
-                        audio_segments.append(audio)
-                        if websocket:  # Stream audio chunk immediately if websocket is provided
-                            audio_bytes = (audio * 32767).astype(np.int16).tobytes()
-                            await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
-                except ValueError as e:
-                    logger.error(f"TTS unpacking error: {e}, assuming single audio output")
-                    if result is not None:
-                        audio_segments.append(result)
-                        if websocket:
-                            audio_bytes = (result * 32767).astype(np.int16).tobytes()
-                            await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
-
+            generator = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipeline(text, voice=self.default_voice, speed=1, split_pattern=r'[.!?。！？]+'))
+            for _, _, audio in generator:
+                audio_segments.append(audio)
             if audio_segments:
                 combined_audio = np.concatenate(audio_segments)
                 self.synthesis_count += 1
                 logger.info(f"TTS synthesized: {len(combined_audio)} samples")
-                return combined_audio if not websocket else None  # Return None if streaming
+                return combined_audio
             return None
         except Exception as e:
             logger.error(f"TTS error: {e}")
@@ -299,30 +268,35 @@ async def handle_client(websocket):
             streamer, initial_text = await gemma_processor.generate_streaming(transcription)
             if not streamer or not initial_text:
                 logger.error("No response generated")
-                await tts_processor.synthesize_speech("Sorry, I couldn’t generate a response.", websocket)
+                initial_audio = await tts_processor.synthesize_speech("Sorry, I couldn’t generate a response.")
+                if initial_audio is not None:
+                    audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
+                    await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
                 return
-
-            # Stream initial audio
-            await tts_processor.synthesize_speech(initial_text, websocket)
-
-            # Stream remaining audio incrementally
+            initial_audio = await tts_processor.synthesize_speech(initial_text)
+            if initial_audio is not None:
+                audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
+                await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
+            else:
+                logger.error("Initial audio synthesis failed")
             remaining_text = ""
             for chunk in streamer:
                 remaining_text += chunk
-                if "." in chunk or "," in chunk or len(remaining_text) > 20:
-                    await tts_processor.synthesize_speech(remaining_text, websocket)
-                    remaining_text = ""
-
-            # Process any leftover text
-            if remaining_text:
-                await tts_processor.synthesize_speech(remaining_text, websocket)
-
+            remaining_audio = await tts_processor.synthesize_speech(remaining_text)
+            if remaining_audio is not None:
+                audio_bytes = (remaining_audio * 32767).astype(np.int16).tobytes()
+                await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
+            else:
+                logger.error("Remaining audio synthesis failed")
             gemma_processor._update_history(transcription, initial_text + remaining_text)
         except asyncio.CancelledError:
             logger.info("Processing cancelled")
         except Exception as e:
             logger.error(f"Processing error: {e}")
-            await tts_processor.synthesize_speech("Sorry, an error occurred.", websocket)
+            error_audio = await tts_processor.synthesize_speech("Sorry, an error occurred.")
+            if error_audio is not None:
+                audio_bytes = (error_audio * 32767).astype(np.int16).tobytes()
+                await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
         finally:
             await detector.set_tts_playing(False)
 
