@@ -32,37 +32,42 @@ class AudioSegmentDetector:
         self.silence_counter = 0
         self.speech_start_idx = 0
         self.lock = asyncio.Lock()
-        self.segment_queue = asyncio.Queue(maxsize=1)  # Reduced to 1 to keep only the latest segment
+        self.segment_queue = asyncio.Queue(maxsize=1)
         self.segments_detected = 0
         self.tts_playing = False
+        self.tts_lock = asyncio.Lock()
+        self.current_generation_task = None
+        self.current_tts_task = None
         self.task_lock = asyncio.Lock()
-        self.current_tasks = set()  # Track all active tasks
 
     async def set_tts_playing(self, is_playing):
-        async with self.task_lock:
+        async with self.tts_lock:
             self.tts_playing = is_playing
 
     async def cancel_current_tasks(self):
         async with self.task_lock:
-            for task in self.current_tasks.copy():
-                if not task.done():
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-            self.current_tasks.clear()
+            if self.current_generation_task and not self.current_generation_task.done():
+                self.current_generation_task.cancel()
+                try:
+                    await self.current_generation_task
+                except asyncio.CancelledError:
+                    pass
+            if self.current_tts_task and not self.current_tts_task.done():
+                self.current_tts_task.cancel()
+                try:
+                    await self.current_tts_task
+                except asyncio.CancelledError:
+                    pass
+            self.current_generation_task = None
+            self.current_tts_task = None
             while not self.segment_queue.empty():
-                await self.segment_queue.get()  # Clear queue to ensure only latest segment remains
+                await self.segment_queue.get()
             await self.set_tts_playing(False)
 
-    async def add_task(self, task):
+    async def set_current_tasks(self, generation_task=None, tts_task=None):
         async with self.task_lock:
-            self.current_tasks.add(task)
-
-    async def remove_task(self, task):
-        async with self.task_lock:
-            self.current_tasks.discard(task)
+            self.current_generation_task = generation_task
+            self.current_tts_task = tts_task
 
     async def add_audio(self, audio_bytes):
         async with self.lock:
@@ -89,7 +94,7 @@ class AudioSegmentDetector:
                             if len(speech_segment) >= self.min_speech_samples * 2:
                                 self.segments_detected += 1
                                 logger.info(f"Speech segment detected: {len(speech_segment) / 2 / self.sample_rate:.2f}s")
-                                await self.cancel_current_tasks()  # Cancel all tasks on new segment
+                                await self.cancel_current_tasks()
                                 await self.segment_queue.put(speech_segment)
                                 return speech_segment
                         elif (len(self.audio_buffer) - self.speech_start_idx) > self.max_speech_samples * 2:
@@ -97,7 +102,7 @@ class AudioSegmentDetector:
                             self.speech_start_idx += self.max_speech_samples * 2
                             self.segments_detected += 1
                             logger.info(f"Max duration speech segment: {len(speech_segment) / 2 / self.sample_rate:.2f}s")
-                            await self.cancel_current_tasks()  # Cancel all tasks on new segment
+                            await self.cancel_current_tasks()
                             await self.segment_queue.put(speech_segment)
                             return speech_segment
         return None
@@ -121,23 +126,11 @@ class WhisperTranscriber:
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.torch_dtype = torch.float16 if self.device != "cpu" else torch.float32
         model_id = "openai/whisper-large-v3-turbo"
-        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_id,
-            torch_dtype=self.torch_dtype,
-            low_cpu_mem_usage=True,
-            use_safetensors=True
-        ).to(self.device)
+        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True).to(self.device)
         self.processor = AutoProcessor.from_pretrained(model_id)
-        self.pipe = pipeline(
-            "automatic-speech-recognition",
-            model=self.model,
-            tokenizer=self.processor.tokenizer,
-            feature_extractor=self.processor.feature_extractor,
-            torch_dtype=self.torch_dtype,
-            device=self.device
-        )
+        self.pipe = pipeline("automatic-speech-recognition", model=self.model, tokenizer=self.processor.tokenizer, feature_extractor=self.processor.feature_extractor, torch_dtype=self.torch_dtype, device=self.device)
         self.transcription_count = 0
-        logger.info(f"Whisper model loaded: {model_id}")
+        logger.info("Whisper model loaded")
 
     async def transcribe(self, audio_bytes, sample_rate=16000):
         try:
@@ -145,13 +138,7 @@ class WhisperTranscriber:
             if len(audio_array) < 500:
                 logger.info("Audio too short for transcription")
                 return ""
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.pipe(
-                    {"raw": audio_array, "sampling_rate": sample_rate},
-                    generate_kwargs={"task": "transcribe", "language": "english"}
-                )
-            )
+            result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"raw": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"}))
             text = result.get("text", "").strip()
             self.transcription_count += 1
             logger.info(f"Transcription: '{text}'")
@@ -176,6 +163,8 @@ class GemmaMultimodalProcessor:
             model_id,
             device_map="auto",
             torch_dtype=torch.bfloat16,
+            # Uncomment if Flash Attention is supported
+            # attn_implementation="flash_attention_2"
         )
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.last_image = None
@@ -183,7 +172,7 @@ class GemmaMultimodalProcessor:
         self.lock = asyncio.Lock()
         self.message_history = []
         self.generation_count = 0
-        logger.info(f"Gemma model loaded: {model_id}")
+        logger.info("Gemma model loaded")
 
     async def set_image(self, image_data):
         async with self.lock:
@@ -203,58 +192,25 @@ class GemmaMultimodalProcessor:
                 return False
 
     def _build_messages(self, text):
-        messages = [
-            {
-                "role": "system",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation."
-                    }
-                ]
-            }
-        ]
+        messages = [{"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation."}]}]
         messages.extend(self.message_history)
         if self.last_image:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": self.last_image},
-                        {"type": "text", "text": text}
-                    ]
-                }
-            )
+            messages.append({"role": "user", "content": [{"type": "image", "image": self.last_image}, {"type": "text", "text": text}]})
         else:
             messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
         return messages
 
     def _update_history(self, user_text, assistant_response):
-        self.message_history = [
-            {"role": "user", "content": [{"type": "text", "text": user_text}]},
-            {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}
-        ]
+        self.message_history = [{"role": "user", "content": [{"type": "text", "text": user_text}]}, {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}]
 
     async def generate_streaming(self, text):
         async with self.lock:
             try:
                 messages = self._build_messages(text)
-                inputs = self.processor.apply_chat_template(
-                    messages,
-                    add_generation_prompt=True,
-                    tokenize=True,
-                    return_dict=True,
-                    return_tensors="pt"
-                ).to(self.model.device)
+                inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
                 from transformers import TextIteratorStreamer
                 streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
-                generation_kwargs = dict(
-                    **inputs,
-                    max_new_tokens=256,  # Increased token limit
-                    do_sample=False,
-                    use_cache=True,
-                    streamer=streamer
-                )
+                generation_kwargs = dict(**inputs, max_new_tokens=256, do_sample=False, use_cache=True, streamer=streamer)
                 import threading
                 threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
                 initial_text = ""
@@ -282,22 +238,14 @@ class KokoroTTSProcessor:
         self.pipeline = KPipeline(lang_code='a')
         self.default_voice = 'af_sarah'
         self.synthesis_count = 0
-        logger.info("Kokoro TTS loaded with KPipeline")
+        logger.info("Kokoro TTS loaded")
 
     async def synthesize_speech(self, text):
         if not text or not self.pipeline:
             return None
         try:
             audio_segments = []
-            generator = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.pipeline(
-                    text,
-                    voice=self.default_voice,
-                    speed=1,
-                    split_pattern=r'[.!?。！？]+'
-                )
-            )
+            generator = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipeline(text, voice=self.default_voice, speed=1, split_pattern=r'[.!?。！？]+'))
             for _, _, audio in generator:
                 audio_segments.append(audio)
             if audio_segments:
@@ -357,15 +305,14 @@ async def handle_client(websocket):
                 await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
         finally:
             await detector.set_tts_playing(False)
-            await detector.remove_task(asyncio.current_task())
 
     async def detect_speech_segments():
         while True:
             speech_segment = await detector.get_next_segment()
             if speech_segment:
-                await detector.cancel_current_tasks()  # Cancel all tasks before starting new one
+                await detector.cancel_current_tasks()
                 task = asyncio.create_task(process_speech_segment(speech_segment))
-                await detector.add_task(task)
+                await detector.set_current_tasks(tts_task=task)
             await asyncio.sleep(0.01)
 
     async def receive_audio_and_images():
