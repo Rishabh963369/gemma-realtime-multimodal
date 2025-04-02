@@ -3,21 +3,17 @@ import json
 import websockets
 import base64
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, Gemma3ForConditionalGeneration
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, TextIteratorStreamer
 import numpy as np
 import logging
 import sys
 import io
 from PIL import Image
 import time
-from kokoro import KPipeline
+from kokoro import KPipeline  # Assuming this is your TTS library
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger(__name__)
 
 class AudioSegmentDetector:
@@ -32,42 +28,37 @@ class AudioSegmentDetector:
         self.silence_counter = 0
         self.speech_start_idx = 0
         self.lock = asyncio.Lock()
-        self.segment_queue = asyncio.Queue(maxsize=5)
+        self.segment_queue = asyncio.Queue(maxsize=1)  # Reduced to 1 to prioritize latest input
         self.segments_detected = 0
         self.tts_playing = False
-        self.tts_lock = asyncio.Lock()
-        self.current_generation_task = None
-        self.current_tts_task = None
+        self.current_tasks = set()  # Track all active tasks
         self.task_lock = asyncio.Lock()
 
     async def set_tts_playing(self, is_playing):
-        async with self.tts_lock:
+        async with self.task_lock:
             self.tts_playing = is_playing
 
-    async def cancel_current_tasks(self):
+    async def cancel_all_tasks(self):
         async with self.task_lock:
-            if self.current_generation_task and not self.current_generation_task.done():
-                self.current_generation_task.cancel()
-                try:
-                    await self.current_generation_task
-                except asyncio.CancelledError:
-                    pass
-            if self.current_tts_task and not self.current_tts_task.done():
-                self.current_tts_task.cancel()
-                try:
-                    await self.current_tts_task
-                except asyncio.CancelledError:
-                    pass
-            self.current_generation_task = None
-            self.current_tts_task = None
+            for task in self.current_tasks.copy():
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+            self.current_tasks.clear()
             while not self.segment_queue.empty():
-                await self.segment_queue.get()
+                await self.segment_queue.get()  # Clear queue to ensure only latest segment is processed
             await self.set_tts_playing(False)
 
-    async def set_current_tasks(self, generation_task=None, tts_task=None):
+    async def add_task(self, task):
         async with self.task_lock:
-            self.current_generation_task = generation_task
-            self.current_tts_task = tts_task
+            self.current_tasks.add(task)
+
+    async def remove_task(self, task):
+        async with self.task_lock:
+            self.current_tasks.discard(task)
 
     async def add_audio(self, audio_bytes):
         async with self.lock:
@@ -94,7 +85,7 @@ class AudioSegmentDetector:
                             if len(speech_segment) >= self.min_speech_samples * 2:
                                 self.segments_detected += 1
                                 logger.info(f"Speech segment detected: {len(speech_segment) / 2 / self.sample_rate:.2f}s")
-                                await self.cancel_current_tasks()
+                                await self.cancel_all_tasks()  # Cancel everything on new segment
                                 await self.segment_queue.put(speech_segment)
                                 return speech_segment
                         elif (len(self.audio_buffer) - self.speech_start_idx) > self.max_speech_samples * 2:
@@ -102,7 +93,7 @@ class AudioSegmentDetector:
                             self.speech_start_idx += self.max_speech_samples * 2
                             self.segments_detected += 1
                             logger.info(f"Max duration speech segment: {len(speech_segment) / 2 / self.sample_rate:.2f}s")
-                            await self.cancel_current_tasks()
+                            await self.cancel_all_tasks()  # Cancel everything on new segment
                             await self.segment_queue.put(speech_segment)
                             return speech_segment
         return None
@@ -129,23 +120,13 @@ class WhisperTranscriber:
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True).to(self.device)
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.pipe = pipeline("automatic-speech-recognition", model=self.model, tokenizer=self.processor.tokenizer, feature_extractor=self.processor.feature_extractor, torch_dtype=self.torch_dtype, device=self.device)
-        self.transcription_count = 0
-        logger.info("Whisper model loaded")
 
     async def transcribe(self, audio_bytes, sample_rate=16000):
-        try:
-            audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-            if len(audio_array) < 500:
-                logger.info("Audio too short for transcription")
-                return ""
-            result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"raw": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"}))
-            text = result.get("text", "").strip()
-            self.transcription_count += 1
-            logger.info(f"Transcription: '{text}'")
-            return text
-        except Exception as e:
-            logger.error(f"Transcription error: {e}")
+        audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        if len(audio_array) < 500:
             return ""
+        result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"raw": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"}))
+        return result.get("text", "").strip()
 
 class GemmaMultimodalProcessor:
     _instance = None
@@ -158,7 +139,6 @@ class GemmaMultimodalProcessor:
 
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        model_id = "google/gemma-3-4b-it"
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
             device_map="auto",
@@ -168,62 +148,29 @@ class GemmaMultimodalProcessor:
         )
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.last_image = None
-        self.last_image_timestamp = 0
-        self.lock = asyncio.Lock()
         self.message_history = []
-        self.generation_count = 0
-        logger.info("Gemma model loaded")
+        self.lock = asyncio.Lock()
 
     async def set_image(self, image_data):
         async with self.lock:
-            try:
-                if not image_data or len(image_data) < 100:
-                    logger.warning("Invalid or empty image data received")
-                    return False
-                image = Image.open(io.BytesIO(image_data))
-                resized_image = image.resize((int(image.size[0] * 0.75), int(image.size[1] * 0.75)), Image.Resampling.LANCZOS)
-                self.message_history = []
-                self.last_image = resized_image
-                self.last_image_timestamp = time.time()
-                logger.info("Image set successfully")
-                return True
-            except Exception as e:
-                logger.error(f"Error processing image: {str(e)}")
-                return False
-
-    def _build_messages(self, text):
-        messages = [{"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation."}]}]
-        messages.extend(self.message_history)
-        if self.last_image:
-            messages.append({"role": "user", "content": [{"type": "image", "image": self.last_image}, {"type": "text", "text": text}]})
-        else:
-            messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
-        return messages
-
-    def _update_history(self, user_text, assistant_response):
-        self.message_history = [{"role": "user", "content": [{"type": "text", "text": user_text}]}, {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}]
+            self.last_image = Image.open(io.BytesIO(image_data)).resize((224, 224), Image.Resampling.LANCZOS)
+            self.message_history = []
 
     async def generate_streaming(self, text):
         async with self.lock:
-            try:
-                messages = self._build_messages(text)
-                inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
-                from transformers import TextIteratorStreamer
-                streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
-                generation_kwargs = dict(**inputs, max_new_tokens=256, do_sample=False, use_cache=True, streamer=streamer)
-                import threading
-                threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
-                initial_text = ""
-                for chunk in streamer:
-                    initial_text += chunk
-                    if len(initial_text) > 10 or "." in chunk or "," in chunk:
-                        break
-                self.generation_count += 1
-                logger.info(f"Generated initial text: '{initial_text}'")
-                return streamer, initial_text
-            except Exception as e:
-                logger.error(f"Gemma streaming error: {e}")
-                return None, f"Sorry, I couldn’t process that due to an error."
+            messages = [{"role": "user", "content": [{"type": "text", "text": text}]}]  # Simplified
+            inputs = self.processor.apply_chat_template(messages, return_tensors="pt").to(self.device)
+            streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True)
+            threading.Thread(target=self.model.generate, kwargs=dict(**inputs, max_new_tokens=512, streamer=streamer)).start()
+            initial_text = ""
+            for chunk in streamer:
+                initial_text += chunk
+                if len(initial_text) > 10 or "." in chunk:
+                    break
+            return streamer, initial_text
+
+    def _update_history(self, user_text, assistant_response):
+        self.message_history = [{"role": "user", "content": [{"type": "text", "text": user_text}]}, {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}]
 
 class KokoroTTSProcessor:
     _instance = None
@@ -237,26 +184,10 @@ class KokoroTTSProcessor:
     def __init__(self):
         self.pipeline = KPipeline(lang_code='a')
         self.default_voice = 'af_sarah'
-        self.synthesis_count = 0
-        logger.info("Kokoro TTS loaded")
 
     async def synthesize_speech(self, text):
-        if not text or not self.pipeline:
-            return None
-        try:
-            audio_segments = []
-            generator = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipeline(text, voice=self.default_voice, speed=1, split_pattern=r'[.!?。！？]+'))
-            for _, _, audio in generator:
-                audio_segments.append(audio)
-            if audio_segments:
-                combined_audio = np.concatenate(audio_segments)
-                self.synthesis_count += 1
-                logger.info(f"TTS synthesized: {len(combined_audio)} samples")
-                return combined_audio
-            return None
-        except Exception as e:
-            logger.error(f"TTS error: {e}")
-            return None
+        audio = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipeline(text, voice=self.default_voice, speed=1))
+        return np.concatenate([seg[2] for seg in audio]) if audio else None
 
 async def handle_client(websocket):
     detector = AudioSegmentDetector()
@@ -267,93 +198,46 @@ async def handle_client(websocket):
     async def process_speech_segment(speech_segment):
         try:
             transcription = await transcriber.transcribe(speech_segment)
-            if not transcription or not any(c.isalnum() for c in transcription):
-                logger.info(f"Skipping empty transcription: '{transcription}'")
+            if not transcription:
                 return
             await detector.set_tts_playing(True)
             streamer, initial_text = await gemma_processor.generate_streaming(transcription)
-            if not streamer or not initial_text:
-                logger.error("No response generated")
-                initial_audio = await tts_processor.synthesize_speech("Sorry, I couldn’t generate a response.")
-                if initial_audio is not None:
-                    audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
-                    await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
+            if not initial_text:
                 return
             initial_audio = await tts_processor.synthesize_speech(initial_text)
             if initial_audio is not None:
-                audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
-                await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
-            else:
-                logger.error("Initial audio synthesis failed")
-            remaining_text = ""
-            for chunk in streamer:
-                remaining_text += chunk
+                await websocket.send(json.dumps({"audio": base64.b64encode((initial_audio * 32767).astype(np.int16).tobytes()).decode('utf-8')}))
+            remaining_text = "".join(chunk for chunk in streamer)
             remaining_audio = await tts_processor.synthesize_speech(remaining_text)
             if remaining_audio is not None:
-                audio_bytes = (remaining_audio * 32767).astype(np.int16).tobytes()
-                await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
-            else:
-                logger.error("Remaining audio synthesis failed")
+                await websocket.send(json.dumps({"audio": base64.b64encode((remaining_audio * 32767).astype(np.int16).tobytes()).decode('utf-8')}))
             gemma_processor._update_history(transcription, initial_text + remaining_text)
-        except asyncio.CancelledError:
-            logger.info("Processing cancelled")
-        except Exception as e:
-            logger.error(f"Processing error: {e}")
-            error_audio = await tts_processor.synthesize_speech("Sorry, an error occurred.")
-            if error_audio is not None:
-                audio_bytes = (error_audio * 32767).astype(np.int16).tobytes()
-                await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
         finally:
             await detector.set_tts_playing(False)
+            await detector.remove_task(asyncio.current_task())
 
     async def detect_speech_segments():
         while True:
             speech_segment = await detector.get_next_segment()
             if speech_segment:
-                await detector.cancel_current_tasks()
                 task = asyncio.create_task(process_speech_segment(speech_segment))
-                await detector.set_current_tasks(tts_task=task)
+                await detector.add_task(task)
             await asyncio.sleep(0.01)
 
     async def receive_audio_and_images():
         async for message in websocket:
-            try:
-                data = json.loads(message)
-                if "realtime_input" in data:
-                    for chunk in data["realtime_input"]["media_chunks"]:
-                        if chunk["mime_type"] == "audio/pcm":
-                            await detector.add_audio(base64.b64decode(chunk["data"]))
-                        elif chunk["mime_type"] == "image/jpeg" and not detector.tts_playing:
-                            image_data = base64.b64decode(chunk["data"])
-                            if image_data:
-                                await gemma_processor.set_image(image_data)
-                if "image" in data and not detector.tts_playing:
-                    image_data = base64.b64decode(data["image"])
-                    if image_data:
-                        await gemma_processor.set_image(image_data)
-            except Exception as e:
-                logger.error(f"Error receiving data: {e}")
+            data = json.loads(message)
+            if "realtime_input" in data:
+                for chunk in data["realtime_input"]["media_chunks"]:
+                    if chunk["mime_type"] == "audio/pcm":
+                        await detector.add_audio(base64.b64decode(chunk["data"]))
+                    elif chunk["mime_type"] == "image/jpeg" and not detector.tts_playing:
+                        await gemma_processor.set_image(base64.b64decode(chunk["data"]))
 
-    async def send_keepalive():
-        while True:
-            await websocket.ping()
-            await asyncio.sleep(20)
-
-    try:
-        await websocket.recv()
-        logger.info("Client connected")
-        await asyncio.gather(receive_audio_and_images(), detect_speech_segments(), send_keepalive())
-    except websockets.exceptions.ConnectionClosed:
-        logger.info("Client disconnected")
-    finally:
-        await detector.cancel_current_tasks()
+    await asyncio.gather(receive_audio_and_images(), detect_speech_segments())
 
 async def main():
-    WhisperTranscriber.get_instance()
-    GemmaMultimodalProcessor.get_instance()
-    KokoroTTSProcessor.get_instance()
-    logger.info("Starting WebSocket server on 0.0.0.0:9073")
-    async with websockets.serve(handle_client, "0.0.0.0", 9073, ping_interval=20, ping_timeout=60, close_timeout=10):
+    async with websockets.serve(handle_client, "0.0.0.0", 9073):
         await asyncio.Future()
 
 if __name__ == "__main__":
