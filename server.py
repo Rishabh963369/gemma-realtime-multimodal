@@ -10,7 +10,7 @@ import sys
 import io
 from PIL import Image
 import time
-from kokoro import KPipeline  # Assuming this is a custom/external TTS library
+from kokoro import KPipeline
 
 # Configure logging
 logging.basicConfig(
@@ -72,9 +72,9 @@ class AudioSegmentDetector:
     async def add_audio(self, audio_bytes):
         async with self.lock:
             self.audio_buffer.extend(audio_bytes)
-            audio_array = torch.from_numpy(np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0).cuda()  # Move to GPU
+            audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             if len(audio_array) > 0:
-                energy = torch.sqrt(torch.mean(audio_array**2)).item()  # Compute on GPU, then to CPU
+                energy = np.sqrt(np.mean(audio_array**2))
                 if not self.is_speech_active and energy > self.energy_threshold:
                     self.is_speech_active = True
                     self.speech_start_idx = max(0, len(self.audio_buffer) - len(audio_bytes))
@@ -133,18 +133,15 @@ class WhisperTranscriber:
         logger.info("Whisper model loaded")
 
     async def transcribe(self, audio_bytes, sample_rate=16000):
-        start_time = time.time()
         try:
-            # Preprocess on GPU, then convert to NumPy for pipeline compatibility
-            audio_tensor = torch.from_numpy(np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0).to(self.device)
-            if len(audio_tensor) < 500:
+            audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            if len(audio_array) < 500:
                 logger.info("Audio too short for transcription")
                 return ""
-            audio_array = audio_tensor.cpu().numpy()  # Convert back to NumPy for pipeline
             result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"raw": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"}))
             text = result.get("text", "").strip()
             self.transcription_count += 1
-            logger.info(f"Transcription in {time.time() - start_time:.2f}s: '{text}'")
+            logger.info(f"Transcription: '{text}'")
             return text
         except Exception as e:
             logger.error(f"Transcription error: {e}")
@@ -162,7 +159,7 @@ class GemmaMultimodalProcessor:
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         model_id = "google/gemma-3-4b-it"
-        self.model = Gemma3ForConditionalGeneration.from_pretrained(model_id, device_map="auto", torch_dtype=torch.float16)  # Full precision
+        self.model = Gemma3ForConditionalGeneration.from_pretrained(model_id, device_map="auto", torch_dtype=torch.bfloat16)
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.last_image = None
         self.last_image_timestamp = 0
@@ -202,13 +199,12 @@ class GemmaMultimodalProcessor:
 
     async def generate_streaming(self, text):
         async with self.lock:
-            start_time = time.time()
             try:
                 messages = self._build_messages(text)
                 inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
                 from transformers import TextIteratorStreamer
                 streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
-                generation_kwargs = dict(**inputs, max_new_tokens=128, do_sample=False, use_cache=True, streamer=streamer)
+                generation_kwargs = dict(**inputs, max_new_tokens=64, do_sample=True, temperature=0.7, use_cache=True, streamer=streamer)
                 import threading
                 threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
                 initial_text = ""
@@ -217,7 +213,7 @@ class GemmaMultimodalProcessor:
                     if len(initial_text) > 20 or "." in chunk or "," in chunk:
                         break
                 self.generation_count += 1
-                logger.info(f"Generated initial text in {time.time() - start_time:.2f}s: '{initial_text}'")
+                logger.info(f"Generated initial text: '{initial_text}'")
                 return streamer, initial_text
             except Exception as e:
                 logger.error(f"Gemma streaming error: {e}")
@@ -239,7 +235,6 @@ class KokoroTTSProcessor:
         logger.info("Kokoro TTS loaded")
 
     async def synthesize_speech(self, text):
-        start_time = time.time()
         if not text or not self.pipeline:
             return None
         try:
@@ -250,7 +245,7 @@ class KokoroTTSProcessor:
             if audio_segments:
                 combined_audio = np.concatenate(audio_segments)
                 self.synthesis_count += 1
-                logger.info(f"TTS synthesized in {time.time() - start_time:.2f}s: {len(combined_audio)} samples")
+                logger.info(f"TTS synthesized: {len(combined_audio)} samples")
                 return combined_audio
             return None
         except Exception as e:
