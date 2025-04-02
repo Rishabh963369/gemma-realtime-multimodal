@@ -135,10 +135,12 @@ class WhisperTranscriber:
     async def transcribe(self, audio_bytes, sample_rate=16000):
         start_time = time.time()
         try:
-            audio_array = torch.from_numpy(np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0).to(self.device)  # GPU preprocessing
-            if len(audio_array) < 500:
+            # Preprocess on GPU, then convert to NumPy for pipeline compatibility
+            audio_tensor = torch.from_numpy(np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0).to(self.device)
+            if len(audio_tensor) < 500:
                 logger.info("Audio too short for transcription")
                 return ""
+            audio_array = audio_tensor.cpu().numpy()  # Convert back to NumPy for pipeline
             result = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipe({"raw": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "english"}))
             text = result.get("text", "").strip()
             self.transcription_count += 1
@@ -160,7 +162,7 @@ class GemmaMultimodalProcessor:
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         model_id = "google/gemma-3-4b-it"
-        self.model = Gemma3ForConditionalGeneration.from_pretrained(model_id, device_map="auto", torch_dtype=torch.float16)  # Full precision, no quantization
+        self.model = Gemma3ForConditionalGeneration.from_pretrained(model_id, device_map="auto", torch_dtype=torch.float16)  # Full precision
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.last_image = None
         self.last_image_timestamp = 0
@@ -206,7 +208,7 @@ class GemmaMultimodalProcessor:
                 inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
                 from transformers import TextIteratorStreamer
                 streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
-                generation_kwargs = dict(**inputs, max_new_tokens=128, do_sample=False, use_cache=True, streamer=streamer)  # Increased max_new_tokens, no sampling
+                generation_kwargs = dict(**inputs, max_new_tokens=128, do_sample=False, use_cache=True, streamer=streamer)
                 import threading
                 threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
                 initial_text = ""
