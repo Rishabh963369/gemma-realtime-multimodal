@@ -10,7 +10,9 @@ import sys
 import io
 from PIL import Image
 import time
-from kokoro import KPipeline
+import re
+from transformers import TextIteratorStreamer
+import threading
 
 # Configure logging
 logging.basicConfig(
@@ -148,76 +150,240 @@ class WhisperTranscriber:
             return ""
 
 class GemmaMultimodalProcessor:
+    """Handles multimodal generation using Gemma 3 model"""
     _instance = None
-
+    
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
-
+    
     def __init__(self):
+        # Use GPU for generation
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Using device for Gemma: {self.device}")
+        
+        # Load model and processor
         model_id = "google/gemma-3-4b-it"
-        self.model = Gemma3ForConditionalGeneration.from_pretrained(model_id, device_map="auto", load_in_8bit=True, torch_dtype=torch.bfloat16)
+        logger.info(f"Loading {model_id}...")
+        
+        # Load model with 8-bit quantization for memory efficiency
+        self.model = Gemma3ForConditionalGeneration.from_pretrained(
+            model_id,
+            device_map="auto",
+            load_in_8bit=True,  # Enable 8-bit quantization
+            torch_dtype=torch.bfloat16
+        )
+        
+        # Load processor
         self.processor = AutoProcessor.from_pretrained(model_id)
+        
+        logger.info("Gemma model ready for multimodal generation")
+        
+        # Cache for most recent image
         self.last_image = None
         self.last_image_timestamp = 0
         self.lock = asyncio.Lock()
+        
+        # Message history management
         self.message_history = []
+        self.max_history_messages = 4  # Keep last 4 exchanges (2 user, 2 assistant)
+        
+        # Counter
         self.generation_count = 0
-        logger.info("Gemma model loaded")
-
+    
     async def set_image(self, image_data):
+        """Cache the most recent image received"""
         async with self.lock:
             try:
-                if not image_data or len(image_data) < 100:
-                    logger.warning("Invalid or empty image data received")
-                    return False
+                # Convert image data to PIL Image
                 image = Image.open(io.BytesIO(image_data))
-                resized_image = image.resize((int(image.size[0] * 0.75), int(image.size[1] * 0.75)), Image.Resampling.LANCZOS)
+                
+                # Resize to 75% of original size
+                new_size = (int(image.size[0] * 0.75), int(image.size[1] * 0.75))
+                image = image.resize(new_size, Image.Resampling.LANCZOS)
+                
+                # Clear message history when new image is set
                 self.message_history = []
-                self.last_image = resized_image
+                self.last_image = image
                 self.last_image_timestamp = time.time()
-                logger.info("Image set successfully")
                 return True
             except Exception as e:
-                logger.error(f"Error processing image: {str(e)}")
+                logger.error(f"Error processing image: {e}")
                 return False
-
+    
     def _build_messages(self, text):
-        messages = [{"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation."}]}]
+        """Build messages array with history for the model, including system prompt"""
+        messages = [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": """You are a helpful assistant providing spoken 
+                responses about images and engaging in natural conversation. Keep your responses concise, 
+                fluent, and conversational. Use natural oral language that's easy to listen to.
+
+                When responding:
+                1. If the user's question or comment is clearly about the image, provide a relevant,
+                   focused response about what you see.
+                2. If the user's input is not clearly related to the image or lacks context:
+                   - Don't force image descriptions into your response
+                   - Respond naturally as in a normal conversation
+                   - If needed, politely ask for clarification (e.g., "Could you please be more specific 
+                     about what you'd like to know about the image?")
+                3. Keep responses concise:
+                   - Aim for 2-3 short sentences
+                   - Focus on the most relevant information
+                   - Use conversational language
+                
+                Maintain conversation context and refer to previous exchanges naturally when relevant.
+                If the user's request is unclear, ask them to repeat or clarify in a friendly way."""}]
+            }
+        ]
+        
+        # Add conversation history
         messages.extend(self.message_history)
+        
+        # Add current user message with image if available
         if self.last_image:
-            messages.append({"role": "user", "content": [{"type": "image", "image": self.last_image}, {"type": "text", "text": text}]})
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": self.last_image},
+                    {"type": "text", "text": text}
+                ]
+            })
         else:
-            messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
+            messages.append({
+                "role": "user",
+                "content": [{"type": "text", "text": text}]
+            })
+        
         return messages
-
+    
     def _update_history(self, user_text, assistant_response):
-        self.message_history = [{"role": "user", "content": [{"type": "text", "text": user_text}]}, {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}]
-
-    async def generate_streaming(self, text):
+        """Update message history with new exchange"""
+        # Add user message
+        self.message_history.append({
+            "role": "user",
+            "content": [{"type": "text", "text": user_text}]
+        })
+        
+        # Add assistant response
+        self.message_history.append({
+            "role": "assistant",
+            "content": [{"type": "text", "text": assistant_response}]
+        })
+        
+        # Trim history to keep only recent messages
+        if len(self.message_history) > self.max_history_messages:
+            self.message_history = self.message_history[-self.max_history_messages:]
+                
+    async def generate_streaming(self, text, initial_chunks=3):
+        """Generate a response using the latest image and text input with streaming for initial chunks"""
         async with self.lock:
             try:
+                if not self.last_image:
+                    logger.warning("No image available for multimodal generation")
+                    return None, f"No image context: {text}"
+                
+                # Build messages with history
                 messages = self._build_messages(text)
-                inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
-                from transformers import TextIteratorStreamer
-                streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
-                generation_kwargs = dict(**inputs, max_new_tokens=64, do_sample=True, temperature=0.7, use_cache=True, streamer=streamer)
-                import threading
-                threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
+                
+                # Prepare inputs for the model
+                inputs = self.processor.apply_chat_template(
+                    messages, 
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    return_dict=True,
+                    return_tensors="pt"
+                ).to(self.model.device)
+                
+                input_len = inputs["input_ids"].shape[-1]
+                
+                # Create a streamer for token-by-token generation
+                streamer = TextIteratorStreamer(
+                    self.processor.tokenizer,
+                    skip_special_tokens=True,
+                    skip_prompt=True
+                )
+                
+                # Start generation in a separate thread
+                generation_kwargs = dict(
+                    **inputs,
+                    max_new_tokens=128,
+                    do_sample=True,
+                    temperature=0.7,
+                    use_cache=True,
+                    streamer=streamer,
+                )
+                
+                thread = threading.Thread(target=self.model.generate, kwargs=generation_kwargs)
+                thread.start()
+                
+                # Collect initial text until we have a complete sentence or enough content
                 initial_text = ""
+                min_chars = 50  # Minimum characters to collect for initial chunk
+                sentence_end_pattern = re.compile(r'[.!?]')
+                has_sentence_end = False
+                
+                # Collect the first sentence or minimum character count
                 for chunk in streamer:
                     initial_text += chunk
-                    if len(initial_text) > 20 or "." in chunk or "," in chunk:
+                    
+                    # Check if we have a sentence end
+                    if sentence_end_pattern.search(chunk):
+                        has_sentence_end = True
+                        # If we have at least some content, break after sentence end
+                        if len(initial_text) >= min_chars / 2:
+                            break
+                    
+                    # If we have enough content, break
+                    if len(initial_text) >= min_chars and (has_sentence_end or "," in initial_text):
                         break
+                    
+                    # Safety check - if we've collected a lot of text without sentence end
+                    if len(initial_text) >= min_chars * 2:
+                        break
+                
+                # Return initial text and the streamer for continued generation
                 self.generation_count += 1
-                logger.info(f"Generated initial text: '{initial_text}'")
+                logger.info(f"Gemma initial generation: '{initial_text}' ({len(initial_text)} chars)")
+                
+                # Don't update history yet - wait for complete response
+                # Store user message for later
+                self.pending_user_message = text
+                self.pending_response = initial_text
+                
                 return streamer, initial_text
+                
             except Exception as e:
-                logger.error(f"Gemma streaming error: {e}")
-                return None, f"Sorry, I couldn’t process that due to an error."
+                logger.error(f"Gemma streaming generation error: {e}")
+                return None, f"Error processing: {text}"
+
+    def _update_history_with_complete_response(self, user_text, initial_response, remaining_text=None):
+        """Update message history with complete response, including any remaining text"""
+        # Combine initial and remaining text if available
+        complete_response = initial_response
+        if remaining_text:
+            complete_response = initial_response + remaining_text
+        
+        # Add user message
+        self.message_history.append({
+            "role": "user",
+            "content": [{"type": "text", "text": user_text}]
+        })
+        
+        # Add complete assistant response
+        self.message_history.append({
+            "role": "assistant",
+            "content": [{"type": "text", "text": complete_response}]
+        })
+        
+        # Trim history to keep only recent messages
+        if len(self.message_history) > self.max_history_messages:
+            self.message_history = self.message_history[-self.max_history_messages:]
+        
+        logger.info(f"Updated message history with complete response ({len(complete_response)} chars)")
 
 class KokoroTTSProcessor:
     _instance = None
@@ -229,6 +395,7 @@ class KokoroTTSProcessor:
         return cls._instance
 
     def __init__(self):
+        from kokoro import KPipeline  # Assuming this is the correct import
         self.pipeline = KPipeline(lang_code='a')
         self.default_voice = 'af_sarah'
         self.synthesis_count = 0
@@ -288,7 +455,7 @@ async def handle_client(websocket):
                 await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
             else:
                 logger.error("Remaining audio synthesis failed")
-            gemma_processor._update_history(transcription, initial_text + remaining_text)
+            gemma_processor._update_history_with_complete_response(transcription, initial_text, remaining_text)
         except asyncio.CancelledError:
             logger.info("Processing cancelled")
         except Exception as e:
