@@ -189,7 +189,7 @@ class GemmaMultimodalProcessor:
     def __init__(self):
         self.accelerator = Accelerator()
         self.device = self.accelerator.device
-        model_id = "google/gemma-4b-it"  # Corrected to a real Gemma model (9B for more VRAM)
+        model_id = "google/gemma-3-4b-it"  # Corrected to a real Gemma model (9B for more VRAM)
         self.model = GemmaForCausalLM.from_pretrained(
             model_id,
             device_map="auto",
