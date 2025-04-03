@@ -124,12 +124,11 @@ class WhisperTranscriber:
 
     def __init__(self):
         self.accelerator = Accelerator()  # Initialize accelerator
-        self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
+        self.device = self.accelerator.device  # Use accelerator device
         self.torch_dtype = torch.bfloat16
         model_id = "distil-whisper/distil-large-v3"
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, use_safetensors=True).to(self.device)
         self.processor = AutoProcessor.from_pretrained(model_id)
-       self.processor = AutoProcessor.from_pretrained(model_id)
         self.pipe = pipeline(
             "automatic-speech-recognition",
             model=self.model,
@@ -139,6 +138,7 @@ class WhisperTranscriber:
             device=self.device,
             model_kwargs={"use_flash_attention_2": True}  # CUDA 12 optimization
         )
+        self.transcription_count = 0  # Initialize transcription count
         logger.info("Whisper model loaded")
 
     async def transcribe(self, audio_bytes, sample_rate=16000):
@@ -155,6 +155,8 @@ class WhisperTranscriber:
         except Exception as e:
             logger.error(f"Transcription error: {e}")
             return ""
+
+
 
 class GemmaMultimodalProcessor:
     _instance = None
