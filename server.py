@@ -8,6 +8,7 @@ import numpy as np
 import logging
 import sys
 import io
+import flash_attn
 from PIL import Image
 import time
 from kokoro import KPipeline
