@@ -120,7 +120,7 @@ class GemmaMultimodalProcessor:
 
     def __init__(self):
         self.device = "cuda:0"
-        model_id = "google/gemma-3-9b-it"  # Larger Gemma3 model to maximize VRAM
+        model_id = "google/gemma-3-4b-it"  # Larger Gemma3 model to maximize VRAM
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
             device_map="auto",
