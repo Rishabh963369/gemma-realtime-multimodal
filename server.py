@@ -11,6 +11,7 @@ import io
 from PIL import Image
 import time
 from kokoro import KPipeline
+from accelerate import Accelerator
 
 # Configure logging
 logging.basicConfig(
@@ -27,6 +28,8 @@ class AudioSegmentDetector:
         self.silence_samples = int(silence_duration * sample_rate)
         self.min_speech_samples = int(min_speech_duration * sample_rate)
         self.max_speech_samples = int(max_speech_duration * sample_rate)
+        self.accelerator = Accelerator()  # Initialize accelerator
+        self.device = self.accelerator.device
         self.audio_buffer = bytearray()
         self.is_speech_active = False
         self.silence_counter = 0
