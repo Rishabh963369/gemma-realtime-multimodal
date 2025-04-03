@@ -12,6 +12,14 @@ from PIL import Image
 import time
 from kokoro import KPipeline
 
+
+# Set PyTorch to allocate most of the available VRAM
+torch.cuda.empty_cache()
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.enabled = True
+torch.cuda.set_per_process_memory_fraction(0.98, device=0)  # Use 98% of VRAM
+
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -159,13 +167,16 @@ class GemmaMultimodalProcessor:
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         model_id = "google/gemma-3-4b-it"
-        self.model = Gemma3ForConditionalGeneration.from_pretrained(
+
+        # Load model with optimized settings
+        self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-            # Uncomment if Flash Attention is supported
-            # attn_implementation="flash_attention_2"
-        )
+            device_map="auto",    # Auto-assign model layers across available GPUs
+            torch_dtype=torch.float16,  # Use half-precision for better performance
+            low_cpu_mem_usage=True  # Optimize memory allocation
+            attn_implementation="flash_attention_2"
+        ).to(self.device)
+
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.last_image = None
         self.last_image_timestamp = 0
