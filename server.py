@@ -9,7 +9,6 @@ import logging
 import sys
 import io
 from PIL import Image
-from accelerate import Accelerator
 import time
 from kokoro import KPipeline
 
@@ -174,7 +173,7 @@ class GemmaMultimodalProcessor:
         model_id = "google/gemma-3-4b-it"
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
-            device_map="auto",
+            device_map="balanced",
             torch_dtype=torch.bfloat16,
             # Uncomment if Flash Attention is supported
             attn_implementation="flash_attention_2"
@@ -223,7 +222,7 @@ class GemmaMultimodalProcessor:
                 inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
                 from transformers import TextIteratorStreamer
                 streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
-                generation_kwargs = dict(**inputs, max_new_tokens=256, do_sample=False, use_cache=True, streamer=streamer)
+                generation_kwargs = dict(**inputs, max_new_tokens=256*4, do_sample=False, use_cache=True, streamer=streamer)
                 import threading
                 threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
                 initial_text = ""
