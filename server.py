@@ -138,7 +138,7 @@ class WhisperTranscriber:
             feature_extractor=self.processor.feature_extractor,
             torch_dtype=self.torch_dtype,
             device=self.device,
-            use_fast=True
+            use_fast=True,
             batch_size=2  # Enable batch processing
         )
         self.model = self.accelerator.prepare(self.model)  # Fixed: Use self.accelerator
