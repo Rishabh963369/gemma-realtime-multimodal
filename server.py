@@ -121,7 +121,7 @@ class AudioSegmentDetector:
 class WhisperTranscriber:
     def __init__(self, instance_id):
         self.device = f"cuda:{instance_id % torch.cuda.device_count()}" if torch.cuda.is_available() else "cpu"
-        self.torch_dtype = torch.float32  # Full precision for more VRAM usage
+        self.torch_dtype = torch.bfloat16  # Full precision for more VRAM usage
         model_id = "openai/whisper-large-v3-turbo"
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=False, use_safetensors=True).to(self.device)
         self.processor = AutoProcessor.from_pretrained(model_id)
