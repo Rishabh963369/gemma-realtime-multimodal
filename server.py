@@ -23,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Number of model instances to maximize GPU usage
-NUM_INSTANCES = 2  # Adjust based on VRAM (e.g., 2-3 for 22 GB)
+NUM_INSTANCES = 1  # Adjust based on VRAM (e.g., 2-3 for 22 GB)
 
 class AudioSegmentDetector:
     def __init__(self, sample_rate=16000, energy_threshold=0.015, silence_duration=0.5, min_speech_duration=0.5, max_speech_duration=10):
