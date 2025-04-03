@@ -28,8 +28,6 @@ class AudioSegmentDetector:
         self.silence_samples = int(silence_duration * sample_rate)
         self.min_speech_samples = int(min_speech_duration * sample_rate)
         self.max_speech_samples = int(max_speech_duration * sample_rate)
-        self.accelerator = Accelerator()  # Initialize accelerator
-        self.device = self.accelerator.device
         self.audio_buffer = bytearray()
         self.is_speech_active = False
         self.silence_counter = 0
@@ -126,6 +124,8 @@ class WhisperTranscriber:
         return cls._instance
 
     def __init__(self):
+        self.accelerator = Accelerator()  # Initialize accelerator
+
         self.device = accelerator.device
         self.torch_dtype = torch.bfloat16
         model_id = "openai/whisper-large-v3-turbo"
@@ -169,6 +169,7 @@ class GemmaMultimodalProcessor:
         return cls._instance
 
     def __init__(self):
+        self.accelerator = Accelerator()
         self.device = accelerator.device
         model_id = "google/gemma-3-4b-it"
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
