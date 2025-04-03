@@ -33,7 +33,7 @@ class AudioSegmentDetector:
         self.silence_counter = 0
         self.speech_start_idx = 0
         self.lock = asyncio.Lock()
-        self.segment_queue = asyncio.Queue(maxsize=2)
+        self.segment_queue = asyncio.Queue(maxsize=1)
         self.segments_detected = 0
         self.tts_playing = False
         self.tts_lock = asyncio.Lock()
@@ -139,7 +139,7 @@ class WhisperTranscriber:
             torch_dtype=self.torch_dtype,
             device=self.device,
             use_fast=True
-            # batch_size=2  # Enable batch processing
+            batch_size=2  # Enable batch processing
         )
         self.model = self.accelerator.prepare(self.model)  # Fixed: Use self.accelerator
         self.transcription_count = 0
