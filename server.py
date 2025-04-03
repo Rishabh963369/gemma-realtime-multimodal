@@ -174,7 +174,7 @@ class WhisperTranscriber:
             device_map="auto",
             low_cpu_mem_usage=True,
             use_safetensors=True
-        ).to(self.device)
+        )
         
         if self.device != "cpu":
             self.model = self.model.half()  # Explicit half-precision
