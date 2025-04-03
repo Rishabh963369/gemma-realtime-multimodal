@@ -173,7 +173,6 @@ class GemmaMultimodalProcessor:
             model_id,
             device_map="auto",    # Auto-assign model layers across available GPUs
             torch_dtype=torch.float16,  # Use half-precision for better performance
-            low_cpu_mem_usage=True  # Optimize memory allocation
             attn_implementation="flash_attention_2"
         ).to(self.device)
 
