@@ -11,6 +11,7 @@ import io
 from PIL import Image
 import time
 from kokoro import KPipeline
+from accelerate import Accelerator
 
 # Configure logging
 logging.basicConfig(
@@ -123,7 +124,8 @@ class WhisperTranscriber:
         return cls._instance
 
     def __init__(self):
-        self.device = accelerator.device
+        self.accelerator = Accelerator()  # Properly initialize the accelerator
+        self.device = self.accelerator.device  
         self.torch_dtype = torch.bfloat16
         model_id = "openai/whisper-large-v3-turbo"
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True).to(self.device)
@@ -167,7 +169,8 @@ class GemmaMultimodalProcessor:
         return cls._instance
 
     def __init__(self):
-        self.device = accelerator.device
+        self.accelerator = Accelerator()  # Properly initialize the accelerator
+        self.device = self.accelerator.device  
         model_id = "google/gemma-3-4b-it"
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
