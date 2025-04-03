@@ -152,7 +152,6 @@ class AudioSegmentDetector:
             return await asyncio.wait_for(self.segment_queue.get(), timeout=0.05)
         except asyncio.TimeoutError:
             return None
-
 class WhisperTranscriber:
     _instance = None
 
@@ -167,7 +166,7 @@ class WhisperTranscriber:
         self.torch_dtype = torch.float16 if self.device != "cpu" else torch.float32
         model_id = "openai/whisper-large-v3-turbo"
         
-        # Enhanced model initialization with explicit quantization
+        # Load model with accelerate
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_id, 
             torch_dtype=self.torch_dtype,
@@ -185,17 +184,16 @@ class WhisperTranscriber:
             model=self.model, 
             tokenizer=self.processor.tokenizer, 
             feature_extractor=self.processor.feature_extractor, 
-            torch_dtype=self.torch_dtype, 
-            device=self.device
+            torch_dtype=self.torch_dtype
+            # Removed `device=self.device` to avoid conflict with accelerate
         )
         
         self.transcription_count = 0
         self.language_cache = {}
-        logger.info(f"Whisper model loaded on {self.device}")
+        logger.info(f"Whisper model loaded with accelerate (device managed automatically)")
 
     async def detect_language(self, audio_array):
         """Only detect language if we haven't seen this user/session before"""
-        # This would be expanded in a multi-user system
         if 'default' not in self.language_cache:
             try:
                 result = await asyncio.get_event_loop().run_in_executor(
@@ -220,12 +218,10 @@ class WhisperTranscriber:
                 logger.info("Audio too short for transcription")
                 return ""
                 
-            # Detect language only on first few calls
             language = "english"
             if self.transcription_count < 3:
                 language = await self.detect_language(audio_array)
             
-            # Optimized transcription with specific params
             result = await asyncio.get_event_loop().run_in_executor(
                 None, 
                 lambda: self.pipe(
@@ -233,8 +229,8 @@ class WhisperTranscriber:
                     generate_kwargs={
                         "task": "transcribe", 
                         "language": language,
-                        "max_new_tokens": 128,  # Limit token generation
-                        "return_timestamps": False  # Disable if not needed
+                        "max_new_tokens": 128,
+                        "return_timestamps": False
                     }
                 )
             )
@@ -248,7 +244,6 @@ class WhisperTranscriber:
             logger.error(f"Transcription error: {e}")
             return ""
         finally:
-            # Optionally clear CUDA cache if many transcriptions happening
             if self.transcription_count % 50 == 0 and torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
