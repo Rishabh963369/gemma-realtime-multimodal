@@ -9,7 +9,7 @@ import logging
 import sys
 import io
 from PIL import Image
-import time  # Added missing import
+import time
 from kokoro import KPipeline  # Assuming this is your TTS library
 
 # Configure logging
@@ -120,7 +120,7 @@ class GemmaMultimodalProcessor:
 
     def __init__(self):
         self.device = "cuda:0"
-        model_id = "google/gemma-3-4b-it"  # Larger Gemma3 model to maximize VRAM
+        model_id = "google/gemma-3-9b-it"  # Larger Gemma3 model to maximize VRAM
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
             device_map="auto",
@@ -188,7 +188,10 @@ class KokoroTTSProcessor:
         audio = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipeline(
             text, voice=self.default_voice, speed=1.2, split_pattern=r'[.!?。！？]+'
         ))
-        return np.concatenate([seg[2] for seg in audio]) if audio else None
+        # Ensure the output is a NumPy array
+        if audio:
+            return np.concatenate([seg[2] for seg in audio])
+        return None
 
 async def handle_client(websocket):
     detector = AudioSegmentDetector()
@@ -207,11 +210,19 @@ async def handle_client(websocket):
                 return
             initial_audio = await tts_processor.synthesize_speech(initial_text)
             if initial_audio is not None:
-                await websocket.send(json.dumps({"audio": base64.b64encode((initial_audio * 32767).astype(np.int16).tobytes()).decode('utf-8')}))
+                # Convert to NumPy array if it’s a Tensor, then to int16
+                if isinstance(initial_audio, torch.Tensor):
+                    initial_audio = initial_audio.cpu().numpy()
+                audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
+                await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
             remaining_text = "".join(chunk for chunk in streamer)
             remaining_audio = await tts_processor.synthesize_speech(remaining_text)
             if remaining_audio is not None:
-                await websocket.send(json.dumps({"audio": base64.b64encode((remaining_audio * 32767).astype(np.int16).tobytes()).decode('utf-8')}))
+                # Convert to NumPy array if it’s a Tensor, then to int16
+                if isinstance(remaining_audio, torch.Tensor):
+                    remaining_audio = remaining_audio.cpu().numpy()
+                audio_bytes = (remaining_audio * 32767).astype(np.int16).tobytes()
+                await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
             logger.info(f"Processing took {time.time() - start_time:.2f}s")
         except Exception as e:
             logger.error(f"Processing error: {e}")
