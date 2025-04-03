@@ -9,6 +9,7 @@ import logging
 import sys
 import io
 from PIL import Image
+import time  # Added missing import
 from kokoro import KPipeline  # Assuming this is your TTS library
 
 # Configure logging
@@ -223,18 +224,30 @@ async def handle_client(websocket):
             await asyncio.sleep(0.002)  # Minimal sleep
 
     async def receive_audio_and_images():
-        async for message in websocket:
-            data = json.loads(message)
-            if "realtime_input" in data:
-                for chunk in data["realtime_input"]["media_chunks"]:
-                    if chunk["mime_type"] == "audio/pcm":
-                        await detector.add_audio(base64.b64decode(chunk["data"]))
-                    elif chunk["mime_type"] == "image/jpeg":
-                        await gemma_processor.set_image(base64.b64decode(chunk["data"]))
+        try:
+            async for message in websocket:
+                data = json.loads(message)
+                if "realtime_input" in data:
+                    for chunk in data["realtime_input"]["media_chunks"]:
+                        if chunk["mime_type"] == "audio/pcm":
+                            await detector.add_audio(base64.b64decode(chunk["data"]))
+                        elif chunk["mime_type"] == "image/jpeg":
+                            await gemma_processor.set_image(base64.b64decode(chunk["data"]))
+        except websockets.exceptions.ConnectionClosedError as e:
+            logger.info(f"WebSocket connection closed: {e}")
+        except Exception as e:
+            logger.error(f"Error in receive_audio_and_images: {e}")
 
-    await asyncio.gather(receive_audio_and_images(), detect_speech_segments())
+    try:
+        logger.info("Connection open")
+        await asyncio.gather(receive_audio_and_images(), detect_speech_segments())
+    except websockets.exceptions.ConnectionClosedError:
+        logger.info("Connection closed by client")
+    except Exception as e:
+        logger.error(f"Handle client error: {e}")
 
 async def main():
+    logger.info("Server listening on 0.0.0.0:9073")
     WhisperTranscriber.get_instance()
     GemmaMultimodalProcessor.get_instance()
     KokoroTTSProcessor.get_instance()
