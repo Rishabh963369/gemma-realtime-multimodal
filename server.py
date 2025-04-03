@@ -366,7 +366,7 @@ class GemmaMultimodalProcessor:
                 device_map=self.device, # Map directly to the target device
                 torch_dtype=self.torch_dtype if not quantization_config else None, # dtype for non-quantized parts, BnB handles compute dtype
                 quantization_config=quantization_config, # Apply quantization if enabled
-                attn_implementation=attn_implementation, # Apply Flash Attention if enabled
+
                 low_cpu_mem_usage=True # Useful for large models
             )
             self.processor = AutoProcessor.from_pretrained(self.model_id)
