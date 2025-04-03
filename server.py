@@ -155,7 +155,7 @@ class GemmaMultimodalProcessor:
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
             device_map="auto",
-            torch_dtype=torch.float32,  # Full precision
+            torch_dtype=torch.bfloat16,  # Full precision
             attn_implementation="flash_attention_2"  # Enable Flash Attention
         )
         self.processor = AutoProcessor.from_pretrained(model_id)
