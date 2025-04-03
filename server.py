@@ -11,7 +11,6 @@ import io
 from PIL import Image
 import time
 from kokoro import KPipeline
-from accelerate import Accelerator
 
 # Configure logging
 logging.basicConfig(
@@ -22,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class AudioSegmentDetector:
-    def __init__(self, sample_rate=16000, energy_threshold=0.015, silence_duration=0.5, min_speech_duration=0.5, max_speech_duration=10):
+    def __init__(self, sample_rate=8000, energy_threshold=0.015, silence_duration=0.5, min_speech_duration=0.5, max_speech_duration=10):
         self.sample_rate = sample_rate
         self.energy_threshold = energy_threshold
         self.silence_samples = int(silence_duration * sample_rate)
@@ -124,9 +123,7 @@ class WhisperTranscriber:
         return cls._instance
 
     def __init__(self):
-        self.accelerator = Accelerator()  # Initialize accelerator
-
-        self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
+        self.device = accelerator.device
         self.torch_dtype = torch.bfloat16
         model_id = "openai/whisper-large-v3-turbo"
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True).to(self.device)
@@ -138,9 +135,10 @@ class WhisperTranscriber:
             feature_extractor=self.processor.feature_extractor,
             torch_dtype=self.torch_dtype,
             device=self.device,
-            batch_size=2  # Enable batch processing
+            use_fast=True
+            # batch_size=2  # Enable batch processing
         )
-        self.model = self.accelerator.prepare(self.model)  # Fixed: Use self.accelerator
+        self.model = accelerator.prepare(self.model)  # Prepare with Accelerator
         self.transcription_count = 0
         logger.info("Whisper model loaded with bfloat16 and batching")
 
@@ -169,8 +167,7 @@ class GemmaMultimodalProcessor:
         return cls._instance
 
     def __init__(self):
-        self.accelerator = Accelerator()  # Properly initialize the accelerator
-        self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
+        self.device = accelerator.device
         model_id = "google/gemma-3-4b-it"
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
@@ -223,7 +220,7 @@ class GemmaMultimodalProcessor:
                 inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
                 from transformers import TextIteratorStreamer
                 streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
-                generation_kwargs = dict(**inputs, max_new_tokens=128, do_sample=False, use_cache=True, streamer=streamer)
+                generation_kwargs = dict(**inputs, max_new_tokens=50, do_sample=False, use_cache=True, streamer=streamer)
                 import threading
                 threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
                 initial_text = ""
@@ -236,7 +233,7 @@ class GemmaMultimodalProcessor:
                 return streamer, initial_text
             except Exception as e:
                 logger.error(f"Gemma streaming error: {e}")
-                return None, f"Sorry, I couldn't process that due to an error."
+                return None, f"Sorry, I couldn’t process that due to an error."
 
 class KokoroTTSProcessor:
     _instance = None
@@ -248,7 +245,7 @@ class KokoroTTSProcessor:
         return cls._instance
 
     def __init__(self):
-        self.pipeline = KPipeline(lang_code='a')
+        self.pipeline = KPipeline(lang_code='a', device='cuda:0')
         self.default_voice = 'af_sarah'
         self.synthesis_count = 0
         logger.info("Kokoro TTS loaded")
@@ -287,7 +284,7 @@ async def handle_client(websocket):
             streamer, initial_text = await gemma_processor.generate_streaming(transcription)
             if not streamer or not initial_text:
                 logger.error("No response generated")
-                initial_audio = await tts_processor.synthesize_speech("Sorry, I couldn't generate a response.")
+                initial_audio = await tts_processor.synthesize_speech("Sorry, I couldn’t generate a response.")
                 if initial_audio is not None:
                     audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
                     await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
