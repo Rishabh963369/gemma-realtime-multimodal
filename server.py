@@ -4,7 +4,7 @@ import websockets
 import base64
 import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, TextIteratorStreamer
-from transformers import Gemma3ForConditionalGeneration  # Assuming this exists; adjust if needed
+from transformers import Gemma3ForConditionalGeneration  # Adjust if needed
 import numpy as np
 import logging
 import sys
@@ -96,7 +96,7 @@ class AudioSegmentDetector:
                             self.is_speech_active = False
                             self.silence_counter = 0
                             self.audio_buffer = self.audio_buffer[speech_end_idx:]
-                            if len(speech_segment) >= self.min_speech_samples * 2:
+                            if len(speech_segment) >= self.min_speech_samplesf * 2:
                                 self.segments_detected += 1
                                 logger.info(f"Speech segment detected: {len(speech_segment) / 2 / self.sample_rate:.2f}s")
                                 await self.cancel_current_tasks()
@@ -193,8 +193,11 @@ class GemmaMultimodalProcessor:
         return messages
 
     def _update_history(self, user_texts, assistant_responses):
-        self.message_history = [{"role": "user", "content": [{"type": "text", "text": user_text}]}, {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}]
-        for user_text, assistant_response in zip(user_texts, assistant_responses)]
+        self.message_history = [
+            {"role": "user", "content": [{"type": "text", "text": user_text}]},
+            {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}
+            for user_text, assistant_response in zip(user_texts, assistant_responses)
+        ]
 
     async def generate_streaming(self, texts):
         async with self.lock:
