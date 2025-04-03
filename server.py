@@ -164,7 +164,7 @@ class GemmaMultimodalProcessor:
             device_map="auto",
             torch_dtype=torch.bfloat16,
             # Uncomment if Flash Attention is supported
-            # attn_implementation="flash_attention_2"
+            attn_implementation="flash_attention_2"
         )
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.last_image = None
