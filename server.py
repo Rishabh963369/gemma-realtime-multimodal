@@ -9,6 +9,7 @@ import logging
 import sys
 import io
 from PIL import Image
+from accelerate import Accelerator
 import time
 from kokoro import KPipeline
 
