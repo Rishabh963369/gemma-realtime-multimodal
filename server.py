@@ -166,7 +166,7 @@ class GemmaMultimodalProcessor:
         return cls._instance
 
     def __init__(self):
-        self.accelerator = Accelerator()  # Properly initialize the accelerator
+self.accelerator = Accelerator()  # Properly initialize the accelerator
         self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
         model_id = "google/gemma-3-4b-it"
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
@@ -182,7 +182,7 @@ class GemmaMultimodalProcessor:
         self.lock = asyncio.Lock()
         self.message_history = []
         self.generation_count = 0
-        logger.info("Gemma model loaded")
+        logger.info("Gemma model loaded with Flash Attention and bfloat16")
 
     async def set_image(self, image_data):
         async with self.lock:
