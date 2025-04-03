@@ -11,7 +11,6 @@ import io
 from PIL import Image
 import time
 from kokoro import KPipeline
-from accelerate import Accelerator
 
 # Configure logging
 logging.basicConfig(
@@ -33,7 +32,7 @@ class AudioSegmentDetector:
         self.silence_counter = 0
         self.speech_start_idx = 0
         self.lock = asyncio.Lock()
-        self.segment_queue = asyncio.Queue(maxsize=2)
+        self.segment_queue = asyncio.Queue(maxsize=1)
         self.segments_detected = 0
         self.tts_playing = False
         self.tts_lock = asyncio.Lock()
@@ -125,12 +124,12 @@ class WhisperTranscriber:
 
     def __init__(self):
         self.accelerator = Accelerator()  # Initialize accelerator
-
         self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
         self.torch_dtype = torch.bfloat16
         model_id = "distil-whisper/distil-large-v3"
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, use_safetensors=True).to(self.device)
         self.processor = AutoProcessor.from_pretrained(model_id)
+       self.processor = AutoProcessor.from_pretrained(model_id)
         self.pipe = pipeline(
             "automatic-speech-recognition",
             model=self.model,
@@ -138,11 +137,9 @@ class WhisperTranscriber:
             feature_extractor=self.processor.feature_extractor,
             torch_dtype=self.torch_dtype,
             device=self.device,
-            model_kwargs={"use_flash_attention_2": True}
+            model_kwargs={"use_flash_attention_2": True}  # CUDA 12 optimization
         )
-        self.model = self.accelerator.prepare(self.model)  # Fixed: Use self.accelerator
-        self.transcription_count = 0
-        logger.info("Whisper model loaded with bfloat16 and batching")
+        logger.info("Whisper model loaded")
 
     async def transcribe(self, audio_bytes, sample_rate=16000):
         try:
@@ -185,7 +182,7 @@ class GemmaMultimodalProcessor:
         self.lock = asyncio.Lock()
         self.message_history = []
         self.generation_count = 0
-        logger.info("Gemma model loaded with Flash Attention and bfloat16")
+        logger.info("Gemma model loaded")
 
     async def set_image(self, image_data):
         async with self.lock:
@@ -236,7 +233,7 @@ class GemmaMultimodalProcessor:
                 return streamer, initial_text
             except Exception as e:
                 logger.error(f"Gemma streaming error: {e}")
-                return None, f"Sorry, I couldn't process that due to an error."
+                return None, f"Sorry, I couldn’t process that due to an error."
 
 class KokoroTTSProcessor:
     _instance = None
@@ -258,7 +255,7 @@ class KokoroTTSProcessor:
             return None
         try:
             audio_segments = []
-            generator = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipeline(text, voice=self.default_voice, speed=1.2, split_pattern=r'[.!?。！？]+'))
+            generator = await asyncio.get_event_loop().run_in_executor(None, lambda: self.pipeline(text, voice=self.default_voice, speed=1, split_pattern=r'[.!?。！？]+'))
             for _, _, audio in generator:
                 audio_segments.append(audio)
             if audio_segments:
@@ -287,7 +284,7 @@ async def handle_client(websocket):
             streamer, initial_text = await gemma_processor.generate_streaming(transcription)
             if not streamer or not initial_text:
                 logger.error("No response generated")
-                initial_audio = await tts_processor.synthesize_speech("Sorry, I couldn't generate a response.")
+                initial_audio = await tts_processor.synthesize_speech("Sorry, I couldn’t generate a response.")
                 if initial_audio is not None:
                     audio_bytes = (initial_audio * 32767).astype(np.int16).tobytes()
                     await websocket.send(json.dumps({"audio": base64.b64encode(audio_bytes).decode('utf-8')}))
@@ -326,7 +323,7 @@ async def handle_client(websocket):
                 await detector.cancel_current_tasks()
                 task = asyncio.create_task(process_speech_segment(speech_segment))
                 await detector.set_current_tasks(tts_task=task)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.01)
 
     async def receive_audio_and_images():
         async for message in websocket:
@@ -350,7 +347,7 @@ async def handle_client(websocket):
     async def send_keepalive():
         while True:
             await websocket.ping()
-            await asyncio.sleep(15)
+            await asyncio.sleep(20)
 
     try:
         await websocket.recv()
