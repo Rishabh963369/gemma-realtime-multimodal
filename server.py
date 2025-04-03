@@ -126,7 +126,8 @@ class WhisperTranscriber:
     def __init__(self):
         self.accelerator = Accelerator()  # Initialize accelerator
 
-        self.device = accelerator.device
+        self.device = self.accelerator.device  
+        
         self.torch_dtype = torch.bfloat16
         model_id = "openai/whisper-large-v3-turbo"
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True).to(self.device)
@@ -169,8 +170,9 @@ class GemmaMultimodalProcessor:
         return cls._instance
 
     def __init__(self):
-        self.accelerator = Accelerator()
-        self.device = accelerator.device
+        self.accelerator = Accelerator()  # Initialize accelerator
+
+        self.device = self.accelerator.device  
         model_id = "google/gemma-3-4b-it"
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
