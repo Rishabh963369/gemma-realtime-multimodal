@@ -124,10 +124,11 @@ class WhisperTranscriber:
 
     def __init__(self):
         self.accelerator = Accelerator()  # Initialize accelerator
-        self.device = self.accelerator.device  # Use accelerator device
+
+        self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
         self.torch_dtype = torch.bfloat16
         model_id = "distil-whisper/distil-large-v3"
-        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, use_safetensors=True).to(self.device)
+        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True).to(self.device)
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.pipe = pipeline(
             "automatic-speech-recognition",
@@ -136,10 +137,11 @@ class WhisperTranscriber:
             feature_extractor=self.processor.feature_extractor,
             torch_dtype=self.torch_dtype,
             device=self.device,
-            model_kwargs={"use_flash_attention_2": True}  # CUDA 12 optimization
+            model_kwargs={"use_flash_attention_2": True}
         )
-        self.transcription_count = 0  # Initialize transcription count
-        logger.info("Whisper model loaded")
+        self.model = self.accelerator.prepare(self.model)  # Fixed: Use self.accelerator
+        self.transcription_count = 0
+        logger.info("Whisper model loaded with bfloat16 and batching")
 
     async def transcribe(self, audio_bytes, sample_rate=16000):
         try:
@@ -156,8 +158,6 @@ class WhisperTranscriber:
             logger.error(f"Transcription error: {e}")
             return ""
 
-
-
 class GemmaMultimodalProcessor:
     _instance = None
 
@@ -168,7 +168,7 @@ class GemmaMultimodalProcessor:
         return cls._instance
 
     def __init__(self):
-self.accelerator = Accelerator()  # Properly initialize the accelerator
+        self.accelerator = Accelerator()  # Properly initialize the accelerator
         self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
         model_id = "google/gemma-3-4b-it"
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
