@@ -3,7 +3,7 @@ import json
 import websockets
 import base64
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, Gemma3ForConditionalGeneration
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, GemmaForCausalLM, TextIteratorStreamer
 from accelerate import Accelerator
 import numpy as np
 import logging
@@ -189,8 +189,8 @@ class GemmaMultimodalProcessor:
     def __init__(self):
         self.accelerator = Accelerator()
         self.device = self.accelerator.device
-        model_id = "google/gemma-3-4b-it"  # Larger model for more VRAM usage
-        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        model_id = "google/gemma-9b-it"  # Corrected to a real Gemma model (9B for more VRAM)
+        self.model = GemmaForCausalLM.from_pretrained(
             model_id,
             device_map="auto",
             torch_dtype=torch.bfloat16,
@@ -202,7 +202,7 @@ class GemmaMultimodalProcessor:
         self.lock = asyncio.Lock()
         self.message_history = []
         self.generation_count = 0
-        logger.info("Gemma-3-9b-it model loaded with Flash Attention and bfloat16")
+        logger.info("Gemma-9b-it model loaded with Flash Attention and bfloat16")
         log_vram_usage()
 
     async def set_image(self, image_data):
@@ -238,10 +238,10 @@ class GemmaMultimodalProcessor:
         async with self.lock:
             try:
                 messages = self._build_messages(text)
-                inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
+                inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.device)
                 streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
                 with torch.cuda.amp.autocast():
-                    generation_kwargs = dict(**inputs, max_new_tokens=512, do_sample=False, use_cache=True, streamer=streamer)  # Increased max_new_tokens
+                    generation_kwargs = dict(**inputs, max_new_tokens=512, do_sample=False, use_cache=True, streamer=streamer)
                     import threading
                     threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
                     initial_text = ""
@@ -302,10 +302,9 @@ async def handle_client(websocket):
 
     async def process_speech_segment(speech_segments):
         try:
-            # Distribute segments across transcribers
             tasks = [t.transcribe([seg]) for t, seg in zip(transcribers, speech_segments[:2])]
             transcriptions_list = await asyncio.gather(*tasks)
-            transcriptions = [t[0] for t in transcriptions_list if t]  # Flatten list
+            transcriptions = [t[0] for t in transcriptions_list if t]
             for transcription, speech_segment in zip(transcriptions, speech_segments):
                 if not transcription or not any(c.isalnum() for c in transcription):
                     logger.info(f"Skipping empty transcription: '{transcription}'")
