@@ -554,7 +554,7 @@ class KokoroTTSProcessor:
 # ---
 
 # --- WebSocket Handler ---
-async def handle_client(websocket, path): # path argument is provided by websockets
+async def handle_client(websocket): # path argument is provided by websockets
     client_address = websocket.remote_address
     logger.info(f"Client connected: {client_address}")
 
