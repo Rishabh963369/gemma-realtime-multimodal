@@ -169,58 +169,63 @@ class GemmaMultimodalProcessor:
         return cls._instance
 
     def __init__(self):
-        from accelerate import Accelerator
-        self.accelerator = Accelerator()  # Automatically handles multi-GPU
-        self.device = self.accelerator.device
-        model_id = "google/gemma-3-12b-it"
-        
-        # Load model with auto device mapping for multi-GPU
+        self.accelerator = Accelerator()  # Properly initialize the accelerator
+        self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
+        model_id = "google/gemma-4b-it"
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
-            device_map="auto",  # Splits model across available GPUs
+            device_map="auto",
             torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2" if torch.cuda.is_available() else "eager"
+            # Uncomment if Flash Attention is supported
+            attn_implementation="flash_attention_2"
         )
         self.processor = AutoProcessor.from_pretrained(model_id)
-        
-        # Prepare model with accelerate for multi-GPU
-        self.model = self.accelerator.prepare(self.model)
-        
         self.last_image = None
         self.last_image_timestamp = 0
         self.lock = asyncio.Lock()
         self.message_history = []
         self.generation_count = 0
-        logger.info("Gemma model loaded with multi-GPU support and bfloat16")
+        logger.info("Gemma model loaded with Flash Attention and bfloat16")
+
+    async def set_image(self, image_data):
+        async with self.lock:
+            try:
+                if not image_data or len(image_data) < 100:
+                    logger.warning("Invalid or empty image data received")
+                    return False
+                image = Image.open(io.BytesIO(image_data))
+                resized_image = image.resize((int(image.size[0] * 0.75), int(image.size[1] * 0.75)), Image.Resampling.LANCZOS)
+                self.message_history = []
+                self.last_image = resized_image
+                self.last_image_timestamp = time.time()
+                logger.info("Image set successfully")
+                return True
+            except Exception as e:
+                logger.error(f"Error processing image: {str(e)}")
+                return False
+
+    def _build_messages(self, text):
+        messages = [{"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation."}]}]
+        messages.extend(self.message_history)
+        if self.last_image:
+            messages.append({"role": "user", "content": [{"type": "image", "image": self.last_image}, {"type": "text", "text": text}]})
+        else:
+            messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
+        return messages
+
+    def _update_history(self, user_text, assistant_response):
+        self.message_history = [{"role": "user", "content": [{"type": "text", "text": user_text}]}, {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}]
 
     async def generate_streaming(self, text):
         async with self.lock:
             try:
                 messages = self._build_messages(text)
-                inputs = self.processor.apply_chat_template(
-                    messages, add_generation_prompt=True, tokenize=True,
-                    return_dict=True, return_tensors="pt"
-                ).to(self.model.device)
-                
+                inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
                 from transformers import TextIteratorStreamer
                 streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
-                
-                # Use accelerate to handle multi-GPU generation
-                generation_kwargs = dict(
-                    **inputs,
-                    max_new_tokens=128,  # Reduced for speed
-                    do_sample=False,
-                    use_cache=True,
-                    streamer=streamer
-                )
-                
-                # Run generation in a separate thread
+                generation_kwargs = dict(**inputs, max_new_tokens=256, do_sample=False, use_cache=True, streamer=streamer)
                 import threading
-                threading.Thread(
-                    target=self.model.generate,
-                    kwargs=generation_kwargs
-                ).start()
-                
+                threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
                 initial_text = ""
                 for chunk in streamer:
                     initial_text += chunk
