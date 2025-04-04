@@ -534,61 +534,21 @@ class KokoroTTSProcessor:
 
         logger.info("Initializing Kokoro TTS processor...")
         # Set default lang code here before try block
-        self.lang_code = 'a' # Default to American English
+        self.lang_code = 'a' # <<< CORRECT CODE IS 'a' HERE
 
         try:
-            logger.info(f"Attempting to initialize Kokoro with lang_code: '{self.lang_code}'")
-            self.pipeline = KPipeline(lang_code=self.lang_code)
+            logger.info(f"Attempting to initialize Kokoro with lang_code: '{self.lang_code}'") # Should log 'a'
+            self.pipeline = KPipeline(lang_code=self.lang_code) # <<< USES 'a' HERE
 
-            # Get available voices AFTER successful pipeline initialization
-            available_voices = self.pipeline.backend.util.SUPPORTED_VOICES
-            logger.debug(f"Available Kokoro voices: {available_voices}")
-
-            # Prefer 'af_sarah' as used in the user's original code
-            self.default_voice = 'af_sarah'
-
-            # Validate the chosen voice exists
-            if self.default_voice not in available_voices:
-                logger.warning(f"Preferred voice '{self.default_voice}' not found in available voices: {available_voices}.")
-                # Fallback: Find the first available voice matching the language code prefix ('a_')
-                fallback_voices = [v for v in available_voices if v.startswith(self.lang_code + '_')]
-                if fallback_voices:
-                    self.default_voice = fallback_voices[0]
-                    logger.info(f"Using fallback voice: '{self.default_voice}'")
-                else:
-                    # If no voices even match the prefix, try the *very first* available voice as last resort
-                    if available_voices:
-                         self.default_voice = available_voices[0]
-                         logger.warning(f"No voices found starting with '{self.lang_code}_'. Using first available voice as last resort: '{self.default_voice}'")
-                    else:
-                         # This case should ideally not happen if pipeline initialized, but handle defensively
-                         raise Exception("No voices found for Kokoro TTS at all, even though pipeline initialized.")
-            else:
-                 logger.info(f"Using configured voice: '{self.default_voice}'")
-
-
-            logger.info(f"Kokoro TTS processor initialized successfully with lang_code '{self.lang_code}' and voice '{self.default_voice}'")
-            self.synthesis_count = 0
-            # Ensure sample rate is available
-            if hasattr(self.pipeline, 'backend') and hasattr(self.pipeline.backend, 'sr'):
-                 self.sample_rate = self.pipeline.backend.sr
-                 logger.info(f"Kokoro TTS sample rate: {self.sample_rate} Hz")
-            else:
-                 # Fallback or error if sample rate cannot be determined
-                 self.sample_rate = 24000 # Default fallback if needed
-                 logger.warning(f"Could not determine Kokoro sample rate automatically. Assuming {self.sample_rate} Hz.")
-
+            # ... rest of the init ...
 
         except AssertionError as e:
              # Log the specific lang_code that failed
-             logger.error(f"FATAL: Kokoro language code assertion failed for lang_code='{self.lang_code}': {e}", exc_info=True)
+             logger.error(f"FATAL: Kokoro language code assertion failed for lang_code='{self.lang_code}': {e}", exc_info=True) # Error log should show 'a' if this code runs
              logger.error(f"Check if lang_code '{self.lang_code}' is valid in your Kokoro installation's LANG_CODES.")
              self.pipeline = None
              raise # Stop server startup
-        except Exception as e:
-            logger.error(f"FATAL: Error initializing Kokoro TTS: {e}", exc_info=True)
-            self.pipeline = None
-            raise # Stop server startup
+
 
 
     async def _synthesize_internal(self, text, split_pattern=None):
