@@ -171,7 +171,7 @@ class GemmaMultimodalProcessor:
     def __init__(self):
         self.accelerator = Accelerator()  # Properly initialize the accelerator
         self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
-        model_id = "google/gemma-4b-it"
+        model_id = "google/gemma-3-4b-pt"
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
             device_map="auto",
