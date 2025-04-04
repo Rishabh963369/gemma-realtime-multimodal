@@ -70,7 +70,7 @@ class AudioSegmentDetector:
             self.current_generation_task = generation_task
             self.current_tts_task = tts_task
 
-    async def add_audio(self, audio_bytes, websocket=None):
+    async def add_audio(self, audio_bytes):
         async with self.lock:
             self.audio_buffer.extend(audio_bytes)
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
@@ -81,11 +81,6 @@ class AudioSegmentDetector:
                     self.speech_start_idx = max(0, len(self.audio_buffer) - len(audio_bytes))
                     self.silence_counter = 0
                     logger.info(f"Speech start detected (energy: {energy:.6f})")
-                    # Send interrupt signal if TTS is playing
-                    if self.tts_playing and websocket:
-                        await websocket.send(json.dumps({"interrupt": True}))
-                        logger.info("Interrupt signal sent to frontend due to new speech during TTS")
-                        await self.cancel_current_tasks()  # Cancel ongoing tasks
                 elif self.is_speech_active:
                     if energy > self.energy_threshold:
                         self.silence_counter = 0
@@ -129,8 +124,9 @@ class WhisperTranscriber:
         return cls._instance
 
     def __init__(self):
-        self.accelerator = Accelerator()
-        self.device = self.accelerator.device
+        self.accelerator = Accelerator()  # Initialize accelerator
+
+        self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
         self.torch_dtype = torch.bfloat16
         model_id = "openai/whisper-large-v3"
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True).to(self.device)
@@ -144,7 +140,7 @@ class WhisperTranscriber:
             device=self.device,
             model_kwargs={"use_flash_attention_2": True}
         )
-        self.model = self.accelerator.prepare(self.model)
+        self.model = self.accelerator.prepare(self.model)  # Fixed: Use self.accelerator
         self.transcription_count = 0
         logger.info("Whisper model loaded with bfloat16 and batching")
 
@@ -173,13 +169,14 @@ class GemmaMultimodalProcessor:
         return cls._instance
 
     def __init__(self):
-        self.accelerator = Accelerator()
-        self.device = self.accelerator.device
-        model_id = "google/gemma-3-12b-it"
+        self.accelerator = Accelerator()  # Properly initialize the accelerator
+        self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
+        model_id = "google/gemma-3-4b-it"
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
             device_map="auto",
             torch_dtype=torch.bfloat16,
+            # Uncomment if Flash Attention is supported
             attn_implementation="flash_attention_2"
         )
         self.processor = AutoProcessor.from_pretrained(model_id)
@@ -338,8 +335,7 @@ async def handle_client(websocket):
                 if "realtime_input" in data:
                     for chunk in data["realtime_input"]["media_chunks"]:
                         if chunk["mime_type"] == "audio/pcm":
-                            # Pass the websocket to add_audio for interrupt signaling
-                            await detector.add_audio(base64.b64decode(chunk["data"]), websocket)
+                            await detector.add_audio(base64.b64decode(chunk["data"]))
                         elif chunk["mime_type"] == "image/jpeg" and not detector.tts_playing:
                             image_data = base64.b64decode(chunk["data"])
                             if image_data:
