@@ -3,7 +3,7 @@ import json
 import websockets
 import base64
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, AutoModelForCausalLM
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, Gemma3ForConditionalGeneration
 import numpy as np
 import logging
 import sys
@@ -171,12 +171,13 @@ class GemmaMultimodalProcessor:
     def __init__(self):
         self.accelerator = Accelerator()  # Properly initialize the accelerator
         self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
-        model_id = "google/gemma-7b-it"
-        self.model = AutoModelForCausalLM.from_pretrained(
+        model_id = "google/gemma-3-12b-it"
+        self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
             device_map="auto",
             torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2"  # Remove if not installed
+            # Uncomment if Flash Attention is supported
+            attn_implementation="flash_attention_2"
         )
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.last_image = None
