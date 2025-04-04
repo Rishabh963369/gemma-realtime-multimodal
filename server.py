@@ -129,11 +129,7 @@ class WhisperTranscriber:
         self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
         self.torch_dtype = torch.bfloat16
         model_id = "openai/whisper-large-v3"
-        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True,
-                use_safetensors=True, device_map="auto",
-                # attn_implementation=ATTN_IMPLEMENTATION # Add if needed and stable
-            ).to(self.device)
+        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True, device_map="auto").to(self.device)
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.pipe = pipeline(
             "automatic-speech-recognition",
@@ -147,7 +143,7 @@ class WhisperTranscriber:
         self.model = self.accelerator.prepare(self.model)  # Fixed: Use self.accelerator
         self.transcription_count = 0
         logger.info("Whisper model loaded with bfloat16 and batching")
-
+        
     async def transcribe(self, audio_bytes, sample_rate=16000):
         try:
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
