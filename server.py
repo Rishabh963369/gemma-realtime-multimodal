@@ -931,7 +931,7 @@ async def main():
         async with websockets.serve(
             handle_client, 
             "0.0.0.0", 
-            9073,
+            9074,
             ping_interval=20,    # Send ping every 20 seconds
             ping_timeout=60,     # Wait up to 60 seconds for pong response
             close_timeout=10     # Wait up to 10 seconds for close handshake
