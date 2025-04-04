@@ -161,6 +161,8 @@ class WhisperTranscriber:
             logger.error(f"Transcription error: {e}")
             return ""
 
+from transformers import GemmaForCausalLM, TextIteratorStreamer
+
 class GemmaMultimodalProcessor:
     _instance = None
 
@@ -174,19 +176,19 @@ class GemmaMultimodalProcessor:
         self.accelerator = Accelerator()
         self.device = self.accelerator.device
         model_id = "google/gemma-7b-it"
-        self.model = AutoModelForCausalLM.from_pretrained(
+        self.model = GemmaForCausalLM.from_pretrained(
             model_id,
             device_map="auto",
             torch_dtype=torch.bfloat16,
             attn_implementation="flash_attention_2"  # Ensure flash-attn is installed
         )
-        self.processor = AutoProcessor.from_pretrained(model_id)  # This is the tokenizer for Gemma
+        self.processor = AutoProcessor.from_pretrained(model_id)  # Returns GemmaTokenizerFast directly
         self.last_image = None
         self.last_image_timestamp = 0
         self.lock = asyncio.Lock()
         self.message_history = []
         self.generation_count = 0
-        logger.info("Gemma model loaded with Flash Attention and bfloat16")
+        logger.info("Gemma-7b-it model loaded with Flash Attention and bfloat16")
 
     async def set_image(self, image_data):
         async with self.lock:
@@ -206,13 +208,13 @@ class GemmaMultimodalProcessor:
                 return False
 
     def _build_messages(self, text):
-        messages = []
-        messages.extend(self.message_history)
+        # Remove system role as Gemma doesn’t support it natively
+        messages = self.message_history.copy()
         if self.last_image:
-            # Note: Gemma-7b-it doesn’t support images natively; this is a placeholder
+            # Gemma is text-only, so convert image context to text (placeholder)
             user_content = [{"type": "text", "text": f"Describe this image: {text}"}]
         else:
-            user_content = [{"type": "text", "text": f"You are a helpful assistant. Respond concisely to: {text}"}]
+            user_content = [{"type": "text", "text": text}]
         messages.append({"role": "user", "content": user_content})
         return messages
 
@@ -227,13 +229,20 @@ class GemmaMultimodalProcessor:
             try:
                 messages = self._build_messages(text)
                 inputs = self.processor.apply_chat_template(
-                    messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"
+                    messages, 
+                    add_generation_prompt=True, 
+                    tokenize=True, 
+                    return_dict=True, 
+                    return_tensors="pt"
                 ).to(self.model.device)
-                from transformers import TextIteratorStreamer
                 # Use self.processor directly as the tokenizer
                 streamer = TextIteratorStreamer(self.processor, skip_special_tokens=True, skip_prompt=True)
                 generation_kwargs = dict(
-                    **inputs, max_new_tokens=256, do_sample=False, use_cache=True, streamer=streamer
+                    **inputs, 
+                    max_new_tokens=256, 
+                    do_sample=False, 
+                    use_cache=True, 
+                    streamer=streamer
                 )
                 import threading
                 threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
