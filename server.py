@@ -130,7 +130,7 @@ class WhisperTranscriber:
         self.torch_dtype = torch.bfloat16
         model_id = "openai/whisper-large-v3"
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                WHISPER_MODEL_ID, torch_dtype=TORCH_DTYPE, low_cpu_mem_usage=True,
+                model_id, torch_dtype=TORCH_DTYPE, low_cpu_mem_usage=True,
                 use_safetensors=True, device_map="auto",
                 # attn_implementation=ATTN_IMPLEMENTATION # Add if needed and stable
             ).to(self.device)
