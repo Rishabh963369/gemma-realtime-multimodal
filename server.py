@@ -3,14 +3,14 @@ import json
 import websockets
 import base64
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, GemmaForCausalLM  # Updated import
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 import numpy as np
 import logging
 import sys
 import io
 from PIL import Image
 import time
-from kokoro import KPipeline
+from kokoro import KPipeline  # Assuming this is your TTS library
 from accelerate import Accelerator
 
 # Configure logging
@@ -170,17 +170,15 @@ class GemmaMultimodalProcessor:
     def __init__(self):
         self.accelerator = Accelerator()
         self.device = self.accelerator.device
-        model_id = "google/gemma-7b-it"  # Updated to gemma-7b-it
-        # Note: Assuming Gemma3ForConditionalGeneration is a typo or custom class.
-        # If not available, use GemmaForCausalLM instead:
-        self.model = GemmaForCausalLM.from_pretrained(
+        model_id = "google/gemma-7b-it"
+        self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
             device_map="auto",
             torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2"  # Remove if not supported
+            attn_implementation="flash_attention_2"  # Remove if not installed
         )
-        self.processor = AutoProcessor.from_pretrained(model_id)
-        self.last_image = None
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        self.last_image_description = None  # Store image description instead of raw image
         self.last_image_timestamp = 0
         self.lock = asyncio.Lock()
         self.message_history = []
@@ -195,8 +193,9 @@ class GemmaMultimodalProcessor:
                     return False
                 image = Image.open(io.BytesIO(image_data))
                 resized_image = image.resize((int(image.size[0] * 0.75), int(image.size[1] * 0.75)), Image.Resampling.LANCZOS)
+                # For simplicity, assume a placeholder description (replace with actual image-to-text model if needed)
+                self.last_image_description = "An image was provided."  # Replace with real captioning logic
                 self.message_history = []
-                self.last_image = resized_image
                 self.last_image_timestamp = time.time()
                 logger.info("Image set successfully")
                 return True
@@ -205,24 +204,29 @@ class GemmaMultimodalProcessor:
                 return False
 
     def _build_messages(self, text):
-        messages = [{"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation."}]}]
-        messages.extend(self.message_history)
-        if self.last_image:
-            messages.append({"role": "user", "content": [{"type": "image", "image": self.last_image}, {"type": "text", "text": text}]})
-        else:
-            messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
+        messages = self.message_history.copy()  # Avoid modifying history directly
+        user_content = [{"type": "text", "text": text}]
+        if self.last_image_description:
+            user_content.insert(0, {"type": "text", "text": f"Image description: {self.last_image_description}"})
+        messages.append({"role": "user", "content": user_content})
         return messages
 
     def _update_history(self, user_text, assistant_response):
-        self.message_history = [{"role": "user", "content": [{"type": "text", "text": user_text}]}, {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}]
+        user_content = [{"type": "text", "text": user_text}]
+        if self.last_image_description:
+            user_content.insert(0, {"type": "text", "text": f"Image description: {self.last_image_description}"})
+        self.message_history = [
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}
+        ]
 
     async def generate_streaming(self, text):
         async with self.lock:
             try:
                 messages = self._build_messages(text)
-                inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
-                from transformers import TextIteratorStreamer
-                streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
+                prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+                streamer = TextIteratorStreamer(self.tokenizer, skip_special_tokens=True, skip_prompt=True)
                 generation_kwargs = dict(**inputs, max_new_tokens=256, do_sample=False, use_cache=True, streamer=streamer)
                 import threading
                 threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
