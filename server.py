@@ -125,36 +125,27 @@ class WhisperTranscriber:
 
 
 
-def __init__(self):
-    self.accelerator = Accelerator()  # Initialize accelerator
-    self.device = self.accelerator.device
-    self.torch_dtype = torch.bfloat16
-    model_id = "openai/whisper-large-v3"
-    
-    # Remove the .to(self.device) here
-    self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        model_id, 
-        torch_dtype=self.torch_dtype, 
-        low_cpu_mem_usage=True, 
-        use_safetensors=True, 
-        device_map="auto"  # Let Accelerate handle device mapping
-    )
-    
-    self.processor = AutoProcessor.from_pretrained(model_id)
-    self.pipe = pipeline(
-        "automatic-speech-recognition",
-        model=self.model,
-        tokenizer=self.processor.tokenizer,
-        feature_extractor=self.processor.feature_extractor,
-        torch_dtype=self.torch_dtype,
-        # Remove the device parameter here
-        model_kwargs={"use_flash_attention_2": True}
-    )
-    
-    # Prepare the model with accelerator - make sure indentation matches the code block
-    self.model = self.accelerator.prepare(self.model)
-    self.transcription_count = 0
-    logger.info("Whisper model loaded with bfloat16 and batching")        
+    def __init__(self):
+        self.accelerator = Accelerator()  # Initialize accelerator
+
+        self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
+        self.torch_dtype = torch.bfloat16
+        model_id = "openai/whisper-large-v3"
+        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True, device_map="auto")
+        self.processor = AutoProcessor.from_pretrained(model_id)
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=self.model,
+            tokenizer=self.processor.tokenizer,
+            feature_extractor=self.processor.feature_extractor,
+            torch_dtype=self.torch_dtype,
+            
+            model_kwargs={"use_flash_attention_2": True}
+        )
+        self.model = self.accelerator.prepare(self.model)  # Fixed: Use self.accelerator
+        self.transcription_count = 0
+        logger.info("Whisper model loaded with bfloat16 and batching")
+
     async def transcribe(self, audio_bytes, sample_rate=16000):
         try:
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
@@ -182,7 +173,7 @@ class GemmaMultimodalProcessor:
     def __init__(self):
         self.accelerator = Accelerator()  # Properly initialize the accelerator
         self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
-        model_id = "google/gemma-2-9b-it"
+        model_id = "google/gemma-7b-it"
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
             device_map="auto",
