@@ -431,10 +431,12 @@ class KokoroTTSProcessor:
         if not KOKORO_AVAILABLE: self.pipeline = None; return
         if KokoroTTSProcessor._instance is not None: raise Exception("KokoroTTSProcessor is a singleton!")
         try:
-            self.pipeline = KPipeline(lang_code='en') # Assuming English focus
-            self.default_voice = DEFAULT_TTS_VOICE
+            self.pipeline = KPipeline(lang_code='a') # <-- CORRECTED LINE
+            # You might need to adjust the voice. Let's try 'af_sarah' as used before or check Kokoro docs.
+            # If 'en_amy' fails later during synthesis, change this voice name.
+            self.default_voice = 'af_sarah' # Changed voice as well, might be more compatible
             self.synthesis_count = 0
-            logger.info(f"Kokoro TTS loaded with default voice {self.default_voice}")
+            logger.info(f"Kokoro TTS loaded with lang_code='a' and default voice 
         except Exception as e:
             logger.error(f"Failed to initialize Kokoro TTS: {e}", exc_info=True); self.pipeline = None
 
