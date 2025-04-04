@@ -54,6 +54,7 @@ class AudioSegmentDetector:
                 except asyncio.CancelledError:
                     pass
             if self.current_tts_task and not self.current_tts_task.done():
+
                 self.current_tts_task.cancel()
                 try:
                     await self.current_tts_task
@@ -171,7 +172,7 @@ class GemmaMultimodalProcessor:
     def __init__(self):
         self.accelerator = Accelerator()  # Properly initialize the accelerator
         self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
-        model_id = "google/gemma-3-12b-it"
+        model_id = "google/gemma-3-12b-it"  # Updated model ID
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
             device_map="auto",
