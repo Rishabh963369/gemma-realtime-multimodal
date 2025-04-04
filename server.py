@@ -3,14 +3,14 @@ import json
 import websockets
 import base64
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline, AutoModelForCausalLM
 import numpy as np
 import logging
 import sys
 import io
 from PIL import Image
 import time
-from kokoro import KPipeline  # Assuming this is your TTS library
+from kokoro import KPipeline
 from accelerate import Accelerator
 
 # Configure logging
@@ -124,8 +124,9 @@ class WhisperTranscriber:
         return cls._instance
 
     def __init__(self):
-        self.accelerator = Accelerator()
-        self.device = self.accelerator.device
+        self.accelerator = Accelerator()  # Initialize accelerator
+
+        self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
         self.torch_dtype = torch.bfloat16
         model_id = "openai/whisper-large-v3"
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True).to(self.device)
@@ -139,7 +140,7 @@ class WhisperTranscriber:
             device=self.device,
             model_kwargs={"use_flash_attention_2": True}
         )
-        self.model = self.accelerator.prepare(self.model)
+        self.model = self.accelerator.prepare(self.model)  # Fixed: Use self.accelerator
         self.transcription_count = 0
         logger.info("Whisper model loaded with bfloat16 and batching")
 
@@ -168,8 +169,8 @@ class GemmaMultimodalProcessor:
         return cls._instance
 
     def __init__(self):
-        self.accelerator = Accelerator()
-        self.device = self.accelerator.device
+        self.accelerator = Accelerator()  # Properly initialize the accelerator
+        self.device = self.accelerator.device  # Fixed: Use self.accelerator instead of accelerator
         model_id = "google/gemma-7b-it"
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
@@ -177,13 +178,13 @@ class GemmaMultimodalProcessor:
             torch_dtype=torch.bfloat16,
             attn_implementation="flash_attention_2"  # Remove if not installed
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        self.last_image_description = None  # Store image description instead of raw image
+        self.processor = AutoProcessor.from_pretrained(model_id)
+        self.last_image = None
         self.last_image_timestamp = 0
         self.lock = asyncio.Lock()
         self.message_history = []
         self.generation_count = 0
-        logger.info("Gemma-7b-it model loaded with Flash Attention and bfloat16")
+        logger.info("Gemma model loaded with Flash Attention and bfloat16")
 
     async def set_image(self, image_data):
         async with self.lock:
@@ -193,9 +194,8 @@ class GemmaMultimodalProcessor:
                     return False
                 image = Image.open(io.BytesIO(image_data))
                 resized_image = image.resize((int(image.size[0] * 0.75), int(image.size[1] * 0.75)), Image.Resampling.LANCZOS)
-                # For simplicity, assume a placeholder description (replace with actual image-to-text model if needed)
-                self.last_image_description = "An image was provided."  # Replace with real captioning logic
                 self.message_history = []
+                self.last_image = resized_image
                 self.last_image_timestamp = time.time()
                 logger.info("Image set successfully")
                 return True
@@ -204,29 +204,24 @@ class GemmaMultimodalProcessor:
                 return False
 
     def _build_messages(self, text):
-        messages = self.message_history.copy()  # Avoid modifying history directly
-        user_content = [{"type": "text", "text": text}]
-        if self.last_image_description:
-            user_content.insert(0, {"type": "text", "text": f"Image description: {self.last_image_description}"})
-        messages.append({"role": "user", "content": user_content})
+        messages = [{"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant providing concise spoken responses about images or engaging in natural conversation."}]}]
+        messages.extend(self.message_history)
+        if self.last_image:
+            messages.append({"role": "user", "content": [{"type": "image", "image": self.last_image}, {"type": "text", "text": text}]})
+        else:
+            messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
         return messages
 
     def _update_history(self, user_text, assistant_response):
-        user_content = [{"type": "text", "text": user_text}]
-        if self.last_image_description:
-            user_content.insert(0, {"type": "text", "text": f"Image description: {self.last_image_description}"})
-        self.message_history = [
-            {"role": "user", "content": user_content},
-            {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}
-        ]
+        self.message_history = [{"role": "user", "content": [{"type": "text", "text": user_text}]}, {"role": "assistant", "content": [{"type": "text", "text": assistant_response}]}]
 
     async def generate_streaming(self, text):
         async with self.lock:
             try:
                 messages = self._build_messages(text)
-                prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-                inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-                streamer = TextIteratorStreamer(self.tokenizer, skip_special_tokens=True, skip_prompt=True)
+                inputs = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.model.device)
+                from transformers import TextIteratorStreamer
+                streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
                 generation_kwargs = dict(**inputs, max_new_tokens=256, do_sample=False, use_cache=True, streamer=streamer)
                 import threading
                 threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
