@@ -180,7 +180,7 @@ class GemmaMultimodalProcessor:
             torch_dtype=torch.bfloat16,
             attn_implementation="flash_attention_2"  # Ensure flash-attn is installed
         )
-        self.processor = AutoProcessor.from_pretrained(model_id)
+        self.processor = AutoProcessor.from_pretrained(model_id)  # This is the tokenizer for Gemma
         self.last_image = None
         self.last_image_timestamp = 0
         self.lock = asyncio.Lock()
@@ -196,7 +196,7 @@ class GemmaMultimodalProcessor:
                     return False
                 image = Image.open(io.BytesIO(image_data))
                 resized_image = image.resize((int(image.size[0] * 0.75), int(image.size[1] * 0.75)), Image.Resampling.LANCZOS)
-                self.message_history = []  # Reset history when a new image is set
+                self.message_history = []
                 self.last_image = resized_image
                 self.last_image_timestamp = time.time()
                 logger.info("Image set successfully")
@@ -206,22 +206,13 @@ class GemmaMultimodalProcessor:
                 return False
 
     def _build_messages(self, text):
-        # Remove system role and incorporate instruction into user prompt if needed
         messages = []
         messages.extend(self.message_history)
-        
-        # Define the user prompt with an instruction if no image is present
         if self.last_image:
-            # For multimodal input, assume Gemma can handle image+text (simplified here)
-            user_content = [
-                {"type": "image", "image": self.last_image},
-                {"type": "text", "text": f"Provide a concise spoken response about this image: {text}"}
-            ]
+            # Note: Gemma-7b-it doesn’t support images natively; this is a placeholder
+            user_content = [{"type": "text", "text": f"Describe this image: {text}"}]
         else:
-            user_content = [
-                {"type": "text", "text": f"You are a helpful assistant. Respond concisely to: {text}"}
-            ]
-        
+            user_content = [{"type": "text", "text": f"You are a helpful assistant. Respond concisely to: {text}"}]
         messages.append({"role": "user", "content": user_content})
         return messages
 
@@ -236,23 +227,14 @@ class GemmaMultimodalProcessor:
             try:
                 messages = self._build_messages(text)
                 inputs = self.processor.apply_chat_template(
-                    messages, 
-                    add_generation_prompt=True, 
-                    tokenize=True, 
-                    return_dict=True, 
-                    return_tensors="pt"
+                    messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"
                 ).to(self.model.device)
-                
                 from transformers import TextIteratorStreamer
-                streamer = TextIteratorStreamer(self.processor.tokenizer, skip_special_tokens=True, skip_prompt=True)
+                # Use self.processor directly as the tokenizer
+                streamer = TextIteratorStreamer(self.processor, skip_special_tokens=True, skip_prompt=True)
                 generation_kwargs = dict(
-                    **inputs, 
-                    max_new_tokens=256, 
-                    do_sample=False, 
-                    use_cache=True, 
-                    streamer=streamer
+                    **inputs, max_new_tokens=256, do_sample=False, use_cache=True, streamer=streamer
                 )
-                
                 import threading
                 threading.Thread(target=self.model.generate, kwargs=generation_kwargs).start()
                 initial_text = ""
@@ -260,13 +242,13 @@ class GemmaMultimodalProcessor:
                     initial_text += chunk
                     if len(initial_text) > 10 or "." in chunk or "," in chunk:
                         break
-                
                 self.generation_count += 1
                 logger.info(f"Generated initial text: '{initial_text}'")
                 return streamer, initial_text
             except Exception as e:
                 logger.error(f"Gemma streaming error: {e}")
                 return None, "Sorry, I couldn’t process that due to an error."
+
 
 class KokoroTTSProcessor:
     _instance = None
