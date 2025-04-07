@@ -14,7 +14,6 @@ import os
 from datetime import datetime
 # Import Kokoro TTS library
 from kokoro import KPipeline
-from accelerate import Accelerator
 import re
 
 # Configure logging
@@ -356,8 +355,7 @@ class GemmaMultimodalProcessor:
     
     def __init__(self):
         # Use GPU for generation
-        self.accelerator = Accelerator()
-        self.device = self.accelerator.device 
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         logger.info(f"Using device for Gemma: {self.device}")
         
         # Load model and processor
@@ -368,9 +366,8 @@ class GemmaMultimodalProcessor:
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
             device_map="auto",
-            torch_dtype=torch.bfloat16,
-            # Uncomment if Flash Attention is supported
-            attn_implementation="flash_attention_2"
+            load_in_8bit=True,  # Enable 8-bit quantization
+            torch_dtype=torch.bfloat16
         )
         
         # Load processor
