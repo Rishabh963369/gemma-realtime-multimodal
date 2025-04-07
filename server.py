@@ -272,17 +272,24 @@ class WhisperTranscriber:
     
     def __init__(self):
         # Use GPU for transcription
-        self.accelerator = Accelerator()  
-
-        self.device = self.accelerator.device
-        self.torch_dtype = torch.bfloat16
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Using device: {self.device}")
+        
+        # Set torch dtype based on device
+        self.torch_dtype = torch.float16 if self.device != "cpu" else torch.float32
         
         # Load model and processor
         model_id = "openai/whisper-large-v3-turbo"
         logger.info(f"Loading {model_id}...")
         
         # Load model
-        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True).to(self.device)
+        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_id, 
+            torch_dtype=self.torch_dtype,
+            low_cpu_mem_usage=True, 
+            use_safetensors=True
+        )
+        self.model.to(self.device)
         
         # Load processor
         self.processor = AutoProcessor.from_pretrained(model_id)
@@ -295,12 +302,10 @@ class WhisperTranscriber:
             feature_extractor=self.processor.feature_extractor,
             torch_dtype=self.torch_dtype,
             device=self.device,
-            model_kwargs={"use_flash_attention_2": True}
         )
         
         logger.info("Whisper model ready for transcription")
         
-        self.model = self.accelerator.prepare(self.model)
         # Counter
         self.transcription_count = 0
     
