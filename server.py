@@ -351,7 +351,6 @@ class GemmaMultimodalProcessor:
     
     def __init__(self):
         # Use GPU for generation
-        __init__(self):
         self.accelerator = Accelerator()
         self.device = self.accelerator.device 
         logger.info(f"Using device for Gemma: {self.device}")
