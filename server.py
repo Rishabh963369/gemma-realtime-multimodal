@@ -14,6 +14,7 @@ import os
 from datetime import datetime
 # Import Kokoro TTS library
 from kokoro import KPipeline
+from accelerate import Accelerator
 import re
 
 # Configure logging
@@ -271,24 +272,17 @@ class WhisperTranscriber:
     
     def __init__(self):
         # Use GPU for transcription
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Using device: {self.device}")
-        
-        # Set torch dtype based on device
-        self.torch_dtype = torch.float16 if self.device != "cpu" else torch.float32
+        self.accelerator = Accelerator()  
+
+        self.device = self.accelerator.device
+        self.torch_dtype = torch.bfloat16
         
         # Load model and processor
         model_id = "openai/whisper-large-v3-turbo"
         logger.info(f"Loading {model_id}...")
         
         # Load model
-        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_id, 
-            torch_dtype=self.torch_dtype,
-            low_cpu_mem_usage=True, 
-            use_safetensors=True
-        )
-        self.model.to(self.device)
+        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, torch_dtype=self.torch_dtype, low_cpu_mem_usage=True, use_safetensors=True).to(self.device)
         
         # Load processor
         self.processor = AutoProcessor.from_pretrained(model_id)
@@ -301,10 +295,12 @@ class WhisperTranscriber:
             feature_extractor=self.processor.feature_extractor,
             torch_dtype=self.torch_dtype,
             device=self.device,
+            model_kwargs={"use_flash_attention_2": True}
         )
         
         logger.info("Whisper model ready for transcription")
         
+        self.model = self.accelerator.prepare(self.model)
         # Counter
         self.transcription_count = 0
     
@@ -355,7 +351,9 @@ class GemmaMultimodalProcessor:
     
     def __init__(self):
         # Use GPU for generation
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        __init__(self):
+        self.accelerator = Accelerator()
+        self.device = self.accelerator.device 
         logger.info(f"Using device for Gemma: {self.device}")
         
         # Load model and processor
@@ -366,8 +364,9 @@ class GemmaMultimodalProcessor:
         self.model = Gemma3ForConditionalGeneration.from_pretrained(
             model_id,
             device_map="auto",
-            load_in_8bit=True,  # Enable 8-bit quantization
-            torch_dtype=torch.bfloat16
+            torch_dtype=torch.bfloat16,
+            # Uncomment if Flash Attention is supported
+            attn_implementation="flash_attention_2"
         )
         
         # Load processor
